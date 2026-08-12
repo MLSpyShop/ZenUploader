@@ -1,0 +1,15 @@
+@import "tailwindcss";
+
+@theme {
+  --zen-blue: #00529B;
+  --zen-light: #f8fafc;
+  --zen-border: #e2e8f0;
+  --f-mono: 'Courier New', Courier, monospace;
+  --f-sans: 'Inter', -apple-system, sans-serif;
+}
+
+body {
+  font-family: var(--f-sans);
+  background-color: var(--zen-light);
+  color: #1e293b;
+}

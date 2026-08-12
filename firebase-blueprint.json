@@ -1,0 +1,26 @@
+{
+  "entities": {
+    "user_settings": {
+      "title": "User Settings",
+      "description": "Stores user-specific settings like Zenodo API key",
+      "type": "object",
+      "properties": {
+        "zenodoApiKey": {
+          "type": "string",
+          "description": "The user's Zenodo API key"
+        },
+        "geminiApiKey": {
+          "type": "string",
+          "description": "The user's Gemini API key"
+        }
+      },
+      "required": ["zenodoApiKey", "geminiApiKey"]
+    }
+  },
+  "firestore": {
+    "users/{userId}/settings/zenodo": {
+      "schema": "user_settings",
+      "description": "Zenodo and Gemini settings for the user"
+    }
+  }
+}

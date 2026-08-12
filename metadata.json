@@ -1,0 +1,6 @@
+{
+  "name": "ZenUploader",
+  "description": "ZenUploader automates Zenodo submission metadata entry from PDFs using AI, featuring Google Drive integration and persistent submission history.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
