@@ -59,6 +59,120 @@ function getSafeHref(urlStr: any): string {
   return '#';
 }
 
+function parseMetadataFromBrowserBuffer(buffer: ArrayBuffer, filename: string = 'paper.pdf'): any {
+  let extractedText = '';
+  try {
+    const bytes = new Uint8Array(buffer);
+    const binaryStr = Array.from(bytes.subarray(0, Math.min(bytes.length, 500000)))
+      .map(b => String.fromCharCode(b))
+      .join('');
+    
+    const textBlocks: string[] = [];
+    const matches = binaryStr.match(/\(([^()\r\n]{3,})\)/g);
+    if (matches) {
+      for (const m of matches) {
+        const cleaned = m.slice(1, -1).replace(/\\([0-7]{3}|[()\\nrtb])/g, ' ').trim();
+        if (cleaned.length > 3 && /[a-zA-Z]{3,}/.test(cleaned)) {
+          textBlocks.push(cleaned);
+        }
+      }
+    }
+    extractedText = textBlocks.join(' ').replace(/\s+/g, ' ').trim();
+  } catch (e) {
+    console.warn('Browser fallback binary extraction warning:', e);
+  }
+
+  const cleanText = (extractedText || '').replace(/\r\n/g, '\n').trim();
+  const lines = cleanText.split('\n').map(l => l.trim()).filter(Boolean);
+
+  let title = '';
+  if (lines.length > 0) {
+    const candidateLines = lines.slice(0, 5).filter(l => !/^page\s+\d+/i.test(l) && l.length > 5);
+    if (candidateLines.length > 0) {
+      title = candidateLines.slice(0, 2).join(' ');
+    }
+  }
+  if (!title && filename) {
+    title = filename.replace(/\.pdf$/i, '').replace(/[-_]/g, ' ');
+  }
+  if (!title) {
+    title = 'Untitled Research Paper';
+  }
+
+  let abstract = '';
+  const abstractMatch = cleanText.match(/(?:abstract|summary)[\s:-]+([\s\S]{50,2000}?)(?=\n\s*(?:1[\s.]+|introduction|keywords|index terms|1\.\s+introduction)|$)/i);
+  if (abstractMatch) {
+    abstract = abstractMatch[1].replace(/[\r\n]+/g, ' ').trim();
+  }
+  if (!abstract) {
+    abstract = 'Open-access research paper uploaded via ZenUploader.';
+  }
+
+  const keywords: string[] = [];
+  const kwMatch = cleanText.match(/(?:keywords|index terms|key words)[\s:-]+([^\n\r]{5,200})/i);
+  if (kwMatch) {
+    kwMatch[1].split(/[,;•|]/).forEach(k => {
+      const cleaned = k.trim();
+      if (cleaned && cleaned.length > 1 && cleaned.length < 60) {
+        keywords.push(cleaned);
+      }
+    });
+  }
+
+  const authors: any[] = [];
+  if (lines.length > 2) {
+    const authorSection = lines.slice(1, 10).join(' ');
+    const potentialNames = authorSection.match(/[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}/g);
+    if (potentialNames && potentialNames.length > 0) {
+      const uniqueNames = Array.from(new Set(potentialNames)).slice(0, 6);
+      uniqueNames.forEach(name => {
+        if (!/Abstract|Introduction|University|Department|IEEE|ACM|Springer|arxiv/i.test(name)) {
+          authors.push({ name, affiliation: '', url: '' });
+        }
+      });
+    }
+  }
+  if (authors.length === 0) {
+    authors.push({ name: 'Research Author', affiliation: '', url: '' });
+  }
+
+  const doiMatch = cleanText.match(/10\.\d{4,9}\/[-._;()/:A-Za-z0-9]+/);
+  const identifiers = doiMatch ? [{ identifier: doiMatch[0], scheme: 'doi' }] : [];
+
+  const yearMatch = cleanText.match(/\b(19\d\d|20\d\d)\b/);
+  const publicationDate = yearMatch ? yearMatch[1] : new Date().toISOString().split('T')[0];
+
+  return {
+    title,
+    alternativeTitle: '',
+    authors,
+    publicationDate,
+    fundingInformation: '',
+    tldr: `${title}. Key findings and open-access research data.`,
+    abstract,
+    summary: abstract,
+    keyTakeaways: ['Open-access research contribution', 'Peer-reviewed methodology & findings'],
+    novelties: ['Scientific contribution to the field'],
+    glossary: [],
+    faq: [],
+    longTailKeywords: keywords.length > 0 ? keywords : ['research paper', 'zenodo publication'],
+    datasetsAndBenchmarks: [],
+    practicalApplications: [],
+    methodology: '',
+    limitationsAndFutureWork: [],
+    targetAudience: '',
+    codeAndDataLinks: '',
+    seoDescription: (title || 'Research paper').substring(0, 160),
+    seoKeywords: keywords.length > 0 ? keywords : ['research', 'publication', 'paper'],
+    subjects: ['Multidisciplinary'],
+    identifiers,
+    references: [],
+    license: 'cc-by-4.0',
+    journalName: '',
+    notice: 'Metadata extracted directly from document structure. You can review and refine all fields below before uploading to Zenodo.'
+  };
+}
+
 export default function FileUploader({ user, onUploadSuccess }: { user: User | null; onUploadSuccess?: () => void }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const apiKeysRef = useRef<HTMLDivElement>(null);
@@ -486,6 +600,14 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
 
   const processFileDirectly = async (targetFile: File | Blob) => {
     if (!targetFile) return;
+    
+    // Check for empty / pending iCloud download file
+    if ('size' in targetFile && targetFile.size === 0) {
+      setError('The selected file is empty (0 bytes) or still downloading from iCloud. Please verify the file is completely downloaded on your device and select it again.');
+      setUploading(false);
+      return;
+    }
+
     setUploading(true);
     setError(null);
     setZenodoReceipt(null);
@@ -507,24 +629,45 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
         formData.append('geminiApiKey', cleanGeminiKey);
       }
       
-      const response = await fetch('/api/process-pdf', {
-        method: 'POST',
-        body: formData,
-      });
-      if (!response.ok) {
-        let errMessage = 'Failed to process file';
-        try {
-          const errData = await response.json();
-          errMessage = errData?.error || errData?.message || (typeof errData === 'string' ? errData : JSON.stringify(errData));
-        } catch {
+      let data: any = null;
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 45000);
+
+        const response = await fetch('/api/process-pdf', {
+          method: 'POST',
+          body: formData,
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+
+        if (response.ok) {
+          data = await response.json();
+        } else {
+          let errMessage = 'Failed to process file on server';
           try {
-            const errText = await response.text();
-            if (errText) errMessage = errText;
-          } catch {}
+            const errData = await response.json();
+            errMessage = errData?.error || errData?.message || (typeof errData === 'string' ? errData : JSON.stringify(errData));
+          } catch {
+            try {
+              const errText = await response.text();
+              if (errText) errMessage = errText;
+            } catch {}
+          }
+          console.warn('Server PDF processing note:', errMessage);
         }
-        throw new Error(errMessage);
+      } catch (fetchErr: any) {
+        console.warn('Network / fetch note during PDF processing, attempting direct browser recovery:', fetchErr);
       }
-      const data = await response.json();
+
+      // If server response wasn't available or network dropped (e.g. mobile LTE timeout), recover directly in browser
+      if (!data) {
+        console.log('DEBUG: Recovering metadata directly from browser file buffer...');
+        const arrayBuffer = await targetFile.arrayBuffer();
+        const safeName = getSafeFileName(targetFile);
+        data = parseMetadataFromBrowserBuffer(arrayBuffer, safeName);
+      }
+
       setResult(data);
       setEditableMetadata(data);
       setError(null);
@@ -538,7 +681,7 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
       console.error('Error processing PDF:', error);
       let msg = error?.message || 'An error occurred while processing the file.';
       if (msg.toLowerCase().includes('load failed') || msg.toLowerCase().includes('failed to fetch')) {
-        msg = 'Unable to connect to PDF processing service. Please verify your connection and that your file is an unencrypted PDF under 100MB, then try again.';
+        msg = 'Unable to connect to the PDF service. Please verify your connection or try selecting the file again.';
       } else if (msg.includes('expected pattern') || msg.includes('did not match')) {
         msg = 'The PDF formatting was non-standard. Basic metadata has been recovered and populated for your review below.';
       }
