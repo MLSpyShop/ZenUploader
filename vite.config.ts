@@ -6,6 +6,10 @@ import {defineConfig} from 'vite';
 export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss()],
+    base: './', // CRITICAL for GitHub Pages sub-path hosting
+    build: {
+      outDir: 'dist',
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

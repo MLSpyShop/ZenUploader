@@ -2,7 +2,7 @@
   "entities": {
     "user_settings": {
       "title": "User Settings",
-      "description": "Stores user-specific settings like Zenodo API key",
+      "description": "Stores user-specific settings like Zenodo API key and Gemini API key",
       "type": "object",
       "properties": {
         "zenodoApiKey": {
@@ -12,15 +12,83 @@
         "geminiApiKey": {
           "type": "string",
           "description": "The user's Gemini API key"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of last settings update"
         }
       },
-      "required": ["zenodoApiKey", "geminiApiKey"]
+      "required": []
+    },
+    "paper_upload": {
+      "title": "Paper Upload",
+      "description": "Stores processed and uploaded research paper metadata and Zenodo record receipts",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique paper record identifier"
+        },
+        "title": {
+          "type": "string",
+          "description": "Title of the research paper"
+        },
+        "status": {
+          "type": "string",
+          "description": "Upload status: processed or uploaded"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO creation timestamp"
+        },
+        "zenodoRecordId": {
+          "type": "string",
+          "description": "Zenodo deposit ID"
+        },
+        "zenodoDoi": {
+          "type": "string",
+          "description": "Zenodo DOI"
+        },
+        "zenodoUrl": {
+          "type": "string",
+          "description": "Zenodo deposit URL"
+        },
+        "metadata": {
+          "type": "object",
+          "description": "Full extracted research metadata payload"
+        }
+      },
+      "required": ["title", "status", "createdAt"]
+    },
+    "deleted_paper": {
+      "title": "Deleted Paper Tombstone",
+      "description": "Tracks deleted paper identifiers to sync deletion across views",
+      "type": "object",
+      "properties": {
+        "deletedAt": {
+          "type": "string",
+          "description": "ISO timestamp when paper was marked deleted"
+        },
+        "title": {
+          "type": "string",
+          "description": "Title of the deleted paper"
+        }
+      },
+      "required": ["deletedAt"]
     }
   },
   "firestore": {
     "users/{userId}/settings/zenodo": {
       "schema": "user_settings",
       "description": "Zenodo and Gemini settings for the user"
+    },
+    "users/{userId}/uploads/{uploadId}": {
+      "schema": "paper_upload",
+      "description": "Research paper uploads and history for the user"
+    },
+    "users/{userId}/deleted_papers/{paperId}": {
+      "schema": "deleted_paper",
+      "description": "Tombstones for deleted papers"
     }
   }
 }

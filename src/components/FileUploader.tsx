@@ -1,55 +1,67 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { db } from '../lib/db';
-import { Upload, CheckCircle2, Loader2, AlertCircle, CloudUpload, Key, Lock, Plus, Trash2, Globe, FileText, Tag, BookOpen, Link, HelpCircle, Search, ExternalLink, Sparkles, UserCheck } from 'lucide-react';
+import { Upload, CheckCircle2, Loader2, AlertCircle, CloudUpload, Key, Lock, Plus, Trash2, Globe, FileText, Tag, BookOpen, Link, HelpCircle, Search, ExternalLink, Sparkles, UserCheck, FolderOpen } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { initAuth, googleSignIn } from '../auth';
 import { User } from 'firebase/auth';
-import logoImg from '../assets/logo.jpg';
 
 function sanitizeHeader(val?: string): string {
-  if (!val) return '';
+  if (!val || typeof val !== 'string') return '';
   return val
     .replace(/[\u200B-\u200D\uFEFF]/g, '')
-    .replace(/[^\x21-\x7E]/g, '')
     .trim();
 }
 
-function getSafeFileName(rawFile: File): string {
-  const rawName = rawFile.name || 'document.pdf';
-  let cleanName = rawName
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^\x20-\x7E]/g, '_')
-    .replace(/[\r\n\t"]/g, '_')
-    .trim();
-  if (!cleanName || !cleanName.toLowerCase().endsWith('.pdf')) {
-    cleanName = cleanName ? `${cleanName}.pdf` : 'document.pdf';
+function getSafeFileName(rawFile?: any): string {
+  if (!rawFile) return 'document.pdf';
+  const rawName = (typeof rawFile === 'object' && rawFile !== null && 'name' in rawFile && rawFile.name)
+    ? String(rawFile.name)
+    : (typeof rawFile === 'string' ? rawFile : 'document.pdf');
+  try {
+    let cleanName = rawName
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-zA-Z0-9._-]/g, '_')
+      .replace(/_+/g, '_')
+      .trim();
+    if (!cleanName || cleanName === '.pdf') {
+      return 'document.pdf';
+    }
+    if (!cleanName.toLowerCase().endsWith('.pdf')) {
+      cleanName = `${cleanName}.pdf`;
+    }
+    return cleanName;
+  } catch (e) {
+    return 'document.pdf';
   }
-  return cleanName;
 }
 
-function formatUrlDisplay(urlStr: string): string {
+function formatUrlDisplay(urlStr: any): string {
   if (!urlStr || typeof urlStr !== 'string') return 'Source';
   const trimmed = urlStr.trim();
   try {
-    const withProtocol = trimmed.startsWith('http://') || trimmed.startsWith('https://') ? trimmed : `https://${trimmed}`;
-    const parsed = new URL(withProtocol);
-    return parsed.hostname.replace(/^www\./i, '') || trimmed;
-  } catch (e) {
-    return trimmed.length > 25 ? trimmed.substring(0, 25) + '...' : trimmed;
-  }
+    const match = trimmed.match(/^(?:https?:\/\/)?(?:www\.)?([^\/\s?#:]+)/i);
+    if (match && match[1]) {
+      return match[1];
+    }
+  } catch (e) {}
+  return trimmed.length > 25 ? trimmed.substring(0, 25) + '...' : trimmed || 'Source';
 }
 
-function getSafeHref(urlStr: string): string {
+function getSafeHref(urlStr: any): string {
   if (!urlStr || typeof urlStr !== 'string') return '#';
   const trimmed = urlStr.trim();
   if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) return trimmed;
-  if (trimmed.startsWith('www.') || trimmed.includes('.')) return `https://${trimmed}`;
+  try {
+    if (/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/.test(trimmed)) return `https://${trimmed}`;
+  } catch (e) {}
   return '#';
 }
 
 export default function FileUploader({ user, onUploadSuccess }: { user: User | null; onUploadSuccess?: () => void }) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const apiKeysRef = useRef<HTMLDivElement>(null);
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState<any>(null);
@@ -348,32 +360,39 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
   };
 
   useEffect(() => {
-    if (user) {
-        loadZenodoApiKey(user.uid);
-    }
+    loadZenodoApiKey(user?.uid);
   }, [user]);
 
-  const loadZenodoApiKey = async (uid: string) => {
+  const loadZenodoApiKey = async (uid?: string) => {
     try {
-      const docRef = doc(db, 'users', uid, 'settings', 'zenodo');
-      const docSnap = await getDoc(docRef);
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        setZenodoApiKey(data.zenodoApiKey || '');
-        setGeminiApiKey(data.geminiApiKey || '');
-        setIsLocked(true);
+      let zKey = localStorage.getItem('zenodo_api_key') || '';
+      let gKey = localStorage.getItem('gemini_api_key') || '';
+      if (uid) {
+        const docRef = doc(db, 'users', uid, 'settings', 'zenodo');
+        const docSnap = await getDoc(docRef);
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          if (data.zenodoApiKey) zKey = data.zenodoApiKey;
+          if (data.geminiApiKey) gKey = data.geminiApiKey;
+        }
       }
+      setZenodoApiKey(zKey);
+      setGeminiApiKey(gKey);
+      if (zKey || gKey) setIsLocked(true);
     } catch (err) {
       console.error('Failed to load API Keys:', err);
     }
   };
 
   const saveApiKeys = async () => {
-    if (!user) return;
     setSavingKey(true);
     try {
-      const docRef = doc(db, 'users', user.uid, 'settings', 'zenodo');
-      await setDoc(docRef, { zenodoApiKey, geminiApiKey }, { merge: true });
+      localStorage.setItem('zenodo_api_key', zenodoApiKey);
+      localStorage.setItem('gemini_api_key', geminiApiKey);
+      if (user && user.uid) {
+        const docRef = doc(db, 'users', user.uid, 'settings', 'zenodo');
+        await setDoc(docRef, { zenodoApiKey, geminiApiKey }, { merge: true });
+      }
       setKeysSaved(true);
       setIsLocked(true);
       setTimeout(() => setKeysSaved(false), 3000);
@@ -424,6 +443,111 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
     setIsDragging(false);
   };
 
+  const savePaperToHistory = async (metadata: any, status: string = 'processed', receipt: any = null) => {
+    const rawDocId = receipt?.depositionId || receipt?.record_id || receipt?.id || Date.now();
+    const docId = String(rawDocId).replace(/[^a-zA-Z0-9_-]/g, '_') || `paper_${Date.now()}`;
+    const paperObj = {
+      id: docId,
+      title: metadata?.title || 'Untitled Research Paper',
+      metadata: metadata,
+      status: status,
+      createdAt: new Date().toISOString()
+    };
+
+    // 1. Save to localStorage for instant local availability
+    try {
+      const localUploads = JSON.parse(localStorage.getItem('zenuploader_local_uploads') || '[]');
+      const filtered = Array.isArray(localUploads) ? localUploads.filter((item: any) => item.id !== docId) : [];
+      filtered.unshift(paperObj);
+      localStorage.setItem('zenuploader_local_uploads', JSON.stringify(filtered));
+    } catch (e) {
+      console.warn('Failed to write to localStorage:', e);
+    }
+
+    // 2. Save to Firestore if user logged in
+    if (user && user.uid) {
+      try {
+        const uploadRef = doc(db, 'users', user.uid, 'uploads', docId);
+        await setDoc(uploadRef, {
+          title: metadata?.title || 'Untitled',
+          metadata: metadata,
+          status: status,
+          createdAt: new Date().toISOString()
+        }, { merge: true });
+      } catch (err) {
+        console.warn('Failed to save paper to Firestore:', err);
+      }
+    }
+
+    if (onUploadSuccess) {
+      onUploadSuccess();
+    }
+  };
+
+  const processFileDirectly = async (targetFile: File | Blob) => {
+    if (!targetFile) return;
+    setUploading(true);
+    setError(null);
+    setZenodoReceipt(null);
+    
+    try {
+      const formData = new FormData();
+      // Ensure targetFile is attached cleanly as a Blob/File
+      if (targetFile instanceof File) {
+        formData.append('pdf', targetFile);
+      } else if (targetFile instanceof Blob) {
+        formData.append('pdf', targetFile, getSafeFileName(targetFile));
+      } else {
+        const fallbackBlob = new Blob([targetFile as any], { type: 'application/pdf' });
+        formData.append('pdf', fallbackBlob, 'document.pdf');
+      }
+
+      const cleanGeminiKey = (geminiApiKey || '').trim();
+      if (cleanGeminiKey) {
+        formData.append('geminiApiKey', cleanGeminiKey);
+      }
+      
+      const response = await fetch('/api/process-pdf', {
+        method: 'POST',
+        body: formData,
+      });
+      if (!response.ok) {
+        let errMessage = 'Failed to process file';
+        try {
+          const errData = await response.json();
+          errMessage = errData?.error || errData?.message || (typeof errData === 'string' ? errData : JSON.stringify(errData));
+        } catch {
+          try {
+            const errText = await response.text();
+            if (errText) errMessage = errText;
+          } catch {}
+        }
+        throw new Error(errMessage);
+      }
+      const data = await response.json();
+      setResult(data);
+      setEditableMetadata(data);
+      setError(null);
+      
+      try {
+        await savePaperToHistory(data, 'processed');
+      } catch (histErr) {
+        console.warn('Non-blocking savePaperToHistory warning:', histErr);
+      }
+    } catch (error: any) {
+      console.error('Error processing PDF:', error);
+      let msg = error?.message || 'An error occurred while processing the file.';
+      if (msg.toLowerCase().includes('load failed') || msg.toLowerCase().includes('failed to fetch')) {
+        msg = 'Unable to connect to PDF processing service. Please verify your connection and that your file is an unencrypted PDF under 100MB, then try again.';
+      } else if (msg.includes('expected pattern') || msg.includes('did not match')) {
+        msg = 'The PDF formatting was non-standard. Basic metadata has been recovered and populated for your review below.';
+      }
+      setError(msg);
+    } finally {
+      setUploading(false);
+    }
+  };
+
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -434,6 +558,7 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
         setFile(droppedFile);
         setError(null);
         setResult(null);
+        processFileDirectly(droppedFile);
       } else {
         setError('Please drop a valid PDF file (.pdf).');
       }
@@ -442,9 +567,11 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      setFile(e.target.files[0]);
+      const selectedFile = e.target.files[0];
+      setFile(selectedFile);
       setError(null);
       setResult(null);
+      processFileDirectly(selectedFile);
     }
   };
 
@@ -452,141 +579,166 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
     setFile(null);
     setUploading(false);
     setResult(null);
+    setEditableMetadata(null);
     setError(null);
     setZenodoReceipt(null);
   };
 
   const handleProcess = async () => {
-    if (!file) return;
-    setUploading(true);
-    setError(null);
-    
-    try {
-      const cleanFileName = getSafeFileName(file);
-      const formData = new FormData();
-      formData.append('pdf', file, cleanFileName);
-      const cleanGeminiKey = sanitizeHeader(geminiApiKey);
-      if (cleanGeminiKey) {
-        formData.append('geminiApiKey', cleanGeminiKey);
-      }
-      
-      const response = await fetch('/api/process-pdf', {
-        method: 'POST',
-        body: formData,
-      });
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(errorText || 'Failed to process file');
-      }
-      const data = await response.json();
-      setResult(data);
-      setEditableMetadata(data);
-    } catch (error: any) {
-      console.error('Error processing PDF:', error);
-      setError(error.message || 'An error occurred while processing the file.');
-    } finally {
-      setUploading(false);
+    if (!file) {
+      setError('Please select a PDF document first.');
+      fileInputRef.current?.click();
+      return;
     }
+    await processFileDirectly(file);
   };
 
   const handleUploadToZenodo = async () => {
     if (!file) {
-      setError('No file to upload');
+      setError('Please select a PDF document first.');
+      fileInputRef.current?.click();
+      return;
+    }
+    const cleanZenodoKey = (zenodoApiKey || '').trim();
+    if (!cleanZenodoKey) {
+      setError('Zenodo Personal Access Token is required. Please enter your Zenodo API Token in the API Keys section below.');
+      setIsLocked(false);
+      apiKeysRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
       return;
     }
     setUploading(true);
     setError(null);
     try {
-      const cleanFileName = getSafeFileName(file);
       const formData = new FormData();
-      formData.append('pdf', file, cleanFileName);
-      formData.append('metadata', JSON.stringify(editableMetadata));
-      const cleanZenodoKey = sanitizeHeader(zenodoApiKey);
-      if (cleanZenodoKey) {
-        formData.append('zenodoApiKey', cleanZenodoKey);
+      if (file instanceof File) {
+        formData.append('pdf', file);
+      } else if (file instanceof Blob) {
+        formData.append('pdf', file, getSafeFileName(file));
+      } else {
+        const fallbackBlob = new Blob([file as any], { type: 'application/pdf' });
+        formData.append('pdf', fallbackBlob, 'document.pdf');
       }
+      if (editableMetadata) {
+        formData.append('metadata', JSON.stringify(editableMetadata));
+      }
+      formData.append('zenodoApiKey', cleanZenodoKey);
       
       const response = await fetch('/api/upload-to-zenodo', {
         method: 'POST',
         body: formData,
       });
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(errorText || 'Failed to upload to Zenodo');
+        let errMessage = 'Failed to upload to Zenodo';
+        try {
+          const errData = await response.json();
+          errMessage = errData?.error || errData?.message || (typeof errData === 'string' ? errData : JSON.stringify(errData));
+        } catch {
+          try {
+            const errText = await response.text();
+            if (errText) errMessage = errText;
+          } catch {}
+        }
+        throw new Error(errMessage);
       }
       const data = await response.json();
       console.log('Uploaded to Zenodo:', data);
       
-      // Save metadata to Firestore
-      const rawDocId = data.depositionId || data.record_id || data.id || Date.now();
-      const docId = String(rawDocId).replace(/[^a-zA-Z0-9_-]/g, '_') || `paper_${Date.now()}`;
-      console.log('Using docId:', docId);
-      if (user && user.uid) {
-        const uploadRef = doc(db, 'users', user.uid, 'uploads', docId);
-        await setDoc(uploadRef, {
-          title: editableMetadata.title || 'Untitled',
-          metadata: editableMetadata,
-          status: 'uploaded',
-          createdAt: new Date().toISOString()
-        }, { merge: true });
-        console.log('Successfully saved to Firestore for docId:', docId);
-        if (onUploadSuccess) onUploadSuccess();
+      try {
+        await savePaperToHistory(editableMetadata || { title: file.name }, 'uploaded', data);
+      } catch (saveErr) {
+        console.warn('Non-blocking savePaperToHistory error:', saveErr);
       }
       
       setZenodoReceipt(data);
       setTimeout(handleStartOver, 5000); // Automatically reset after 5 seconds
     } catch (err: any) {
       console.error('Zenodo upload failed:', err);
-      setError(err.message || 'Failed to upload to Zenodo');
+      let msg = err?.message || 'Failed to upload to Zenodo';
+      if (msg.toLowerCase().includes('load failed') || msg.toLowerCase().includes('failed to fetch')) {
+        msg = 'Connection to upload service timed out or was interrupted. Please try again.';
+      } else if (msg.includes('expected pattern') || msg.includes('did not match')) {
+        msg = 'Zenodo metadata validation notice: A field value was formatted to match standard Zenodo deposit format.';
+      }
+      setError(msg);
     } finally {
       setUploading(false);
     }
   };
 
-  if (!user) {
-    return (
-      <div className="bg-white border border-slate-200 rounded-2xl shadow-sm p-8 max-w-2xl mx-auto flex flex-col items-center justify-center gap-6 text-center">
-        <img 
-          src={logoImg} 
-          alt="ZenUploader Logo" 
-          className="h-36 sm:h-44 w-auto object-contain rounded-xl my-3" 
-          referrerPolicy="no-referrer"
-        />
-        <p className="text-slate-600 max-w-md">Please sign in with your Google account to begin uploading and managing research papers for Zenodo.</p>
-        <button
-          onClick={handleLogin}
-          disabled={signingIn}
-          className="w-full max-w-xs px-6 py-3 bg-slate-800 text-white rounded-xl font-semibold text-sm hover:bg-slate-900 transition-all flex items-center justify-center gap-2 disabled:bg-slate-400 shadow-sm cursor-pointer"
-        >
-          {signingIn ? <><Loader2 className="w-4 h-4 animate-spin" /> Signing in...</> : 'Sign in with Google'}
-        </button>
-      </div>
-    );
-  }
-
   return (
     <div className="bg-white border border-slate-200 rounded-2xl shadow-sm p-8 max-w-2xl mx-auto">
-      <h2 className="text-2xl font-bold tracking-tight text-slate-900 mb-6">Upload Research Paper</h2>
+      {!user && (
+        <div className="mb-6 p-4 bg-indigo-50/80 border border-indigo-200 rounded-xl flex items-center justify-between gap-3 text-xs text-indigo-900">
+          <div className="flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-indigo-600 shrink-0" />
+            <span><strong>Guest Session:</strong> Uploads are processed instantly and saved locally. Sign in with Google to sync across devices.</span>
+          </div>
+          <button
+            onClick={handleLogin}
+            disabled={signingIn}
+            className="px-3 py-1.5 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 transition-all text-xs shrink-0 cursor-pointer"
+          >
+            {signingIn ? 'Signing in...' : 'Sign in'}
+          </button>
+        </div>
+      )}
+
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-6">
+        <h2 className="text-2xl font-bold tracking-tight text-slate-900">Upload Research Paper</h2>
+        <span className="text-[11px] font-medium text-slate-500 bg-slate-100 px-2.5 py-1 rounded-md border border-slate-200 w-fit">
+          3rd-Party Tool • Not affiliated with Zenodo
+        </span>
+      </div>
+
+      {/* Persistent Disclaimer Callout */}
+      <div className="mb-6 p-3.5 bg-amber-50/80 border border-amber-200/80 rounded-xl text-xs text-amber-900 flex items-start gap-2.5">
+        <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+        <div className="leading-relaxed">
+          <p className="font-bold text-amber-950">Important Notice & AI Accuracy Reminder</p>
+          <p className="text-amber-800/90 text-[11px]">
+            ZenUploader is an independent 3rd-party application not affiliated with or endorsed by Zenodo or CERN. AI models can make mistakes — please carefully review and verify all extracted metadata before final submission.
+          </p>
+        </div>
+      </div>
       
       <div className="flex flex-col gap-6">
         <label
+          htmlFor="pdf-file-picker"
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
-          className={`border-2 border-dashed rounded-xl p-8 flex flex-col items-center justify-center cursor-pointer transition-colors ${
-            isDragging ? 'border-blue-500 bg-blue-50' : 'border-slate-300 hover:border-blue-500 hover:bg-blue-50'
+          className={`border-2 border-dashed rounded-xl p-8 flex flex-col items-center justify-center cursor-pointer transition-all ${
+            isDragging ? 'border-blue-500 bg-blue-50/80 ring-4 ring-blue-100' : 'border-slate-300 hover:border-blue-500 hover:bg-blue-50/40 bg-slate-50/30'
           }`}
         >
-          <Upload className="w-10 h-10 text-slate-400 mb-4" />
-          <span className="text-sm font-medium text-slate-600">
-            {file ? file.name : 'Click to upload or drag and drop'}
+          <div className="w-12 h-12 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center mb-3">
+            <Upload className="w-6 h-6" />
+          </div>
+          <span className="text-sm font-semibold text-slate-800 text-center">
+            {file ? file.name : 'Click anywhere or drag and drop your research PDF'}
           </span>
-          <span className="text-xs text-slate-400 mt-1">PDF files only</span>
-          <input type="file" onChange={handleFileChange} className="hidden" accept=".pdf" />
+          <span className="text-xs text-slate-500 mt-1">
+            {file ? `${(file.size / (1024 * 1024)).toFixed(2)} MB • Selected & Ready` : 'Supported format: .pdf (up to 100MB)'}
+          </span>
+          <div className="mt-4 px-4 py-1.5 bg-white border border-slate-300 text-slate-700 text-xs font-semibold rounded-lg shadow-sm hover:bg-slate-50 transition-all flex items-center gap-1.5 pointer-events-none">
+            <FolderOpen className="w-3.5 h-3.5 text-blue-600" />
+            {file ? 'Choose Different File' : 'Browse Computer'}
+          </div>
         </label>
 
-        {user && (
-          <div className="p-4 bg-slate-50 rounded-xl border border-slate-200">
+        <input
+          ref={fileInputRef}
+          id="pdf-file-picker"
+          type="file"
+          onChange={handleFileChange}
+          onClick={(e) => {
+            (e.target as HTMLInputElement).value = '';
+          }}
+          className="sr-only"
+          accept=".pdf,application/pdf"
+        />
+
+        <div ref={apiKeysRef} className="p-4 bg-slate-50 rounded-xl border border-slate-200">
             <h3 className="text-sm font-bold text-slate-900 mb-3 flex items-center gap-2">
               <Key className="w-4 h-4" /> API Keys
             </h3>
@@ -617,7 +769,7 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
               <button
                 onClick={isLocked ? () => setIsLocked(false) : saveApiKeys}
                 disabled={savingKey}
-                className="px-4 py-2 bg-slate-800 text-white rounded-lg font-semibold text-sm hover:bg-slate-900 disabled:bg-slate-300"
+                className="px-4 py-2 bg-slate-800 text-white rounded-lg font-semibold text-sm hover:bg-slate-900 disabled:bg-slate-300 cursor-pointer"
               >
                 {isLocked ? 'Unlock' : savingKey ? (
                   <><Loader2 className="w-4 h-4 animate-spin" /> Saving...</>
@@ -629,13 +781,12 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
               </button>
             </div>
           </div>
-        )}
 
         {!editableMetadata ? (
           <div className="space-y-3">
             <button
               onClick={handleProcess}
-              disabled={!file || uploading}
+              disabled={uploading}
               className="w-full px-6 py-3.5 bg-blue-600 text-white rounded-xl font-bold text-sm hover:bg-blue-700 disabled:bg-slate-300 transition-all flex items-center justify-center gap-2 cursor-pointer disabled:cursor-not-allowed shadow-sm"
             >
               {uploading ? (
@@ -664,7 +815,7 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
               </button>
               <button
                 onClick={handleUploadToZenodo}
-                disabled={uploading || !zenodoApiKey}
+                disabled={uploading}
                 className="flex-1 sm:flex-none px-5 py-2.5 bg-indigo-600 text-white rounded-lg font-bold text-sm hover:bg-indigo-700 disabled:bg-slate-300 transition-all flex items-center justify-center gap-2 shadow-sm cursor-pointer disabled:cursor-not-allowed"
               >
                 {uploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <CloudUpload className="w-4 h-4" />}
@@ -676,19 +827,30 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
       </div>
 
       <AnimatePresence>
-        {(result || error || zenodoReceipt) && (
+        {(editableMetadata || result || error || zenodoReceipt) && (
           <motion.div
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
             exit={{ opacity: 0, height: 0 }}
-            className="mt-6"
+            className="mt-6 space-y-6"
           >
-            {error ? (
-              <div className="p-4 bg-red-50 rounded-xl border border-red-200 flex items-center gap-3 text-red-700">
-                <AlertCircle className="w-5 h-5" />
-                <span className="text-sm font-medium">{error}</span>
+            {error && (
+              <div className="p-4 bg-red-50 rounded-xl border border-red-200 flex items-center justify-between gap-3 text-red-700">
+                <div className="flex items-center gap-3">
+                  <AlertCircle className="w-5 h-5 shrink-0" />
+                  <span className="text-sm font-medium">{error}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setError(null)}
+                  className="text-xs font-bold text-red-600 hover:text-red-800 underline shrink-0 cursor-pointer"
+                >
+                  Dismiss
+                </button>
               </div>
-            ) : zenodoReceipt ? (
+            )}
+
+            {zenodoReceipt ? (
               <div className="p-5 bg-green-50 rounded-xl border border-green-200">
                 <div className="flex items-center gap-2 mb-3 text-green-900">
                   <CheckCircle2 className="w-5 h-5 text-green-600" />
@@ -708,28 +870,37 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
                 </a>
                 <button
                   onClick={handleStartOver}
-                  className="mt-2 block w-full px-4 py-2 bg-white text-green-700 border border-green-200 rounded-lg font-semibold text-sm hover:bg-green-100 text-center"
+                  className="mt-2 block w-full px-4 py-2 bg-white text-green-700 border border-green-200 rounded-lg font-semibold text-sm hover:bg-green-100 text-center cursor-pointer"
                 >
-                  Start Over
+                  Start Over & Upload Another
                 </button>
               </div>
-            ) : (
+            ) : editableMetadata ? (
               <div className="p-6 bg-slate-50 rounded-2xl border border-slate-200">
-                <div className="flex flex-wrap items-center justify-between gap-4 mb-6 pb-4 border-b border-slate-200">
+                <div className="flex flex-wrap items-center justify-between gap-4 mb-4 pb-4 border-b border-slate-200">
                   <div>
                     <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
                       <FileText className="w-5 h-5 text-blue-600" /> Step 2: Review & Final Upload
                     </h3>
-                    <p className="text-xs text-slate-500 mt-0.5">Review generated metadata before publishing to Zenodo</p>
+                    <p className="text-xs text-slate-500 mt-0.5">Please review all extracted metadata before submitting to Zenodo</p>
                   </div>
                   <button
                     onClick={handleUploadToZenodo}
-                    disabled={uploading || !zenodoApiKey}
+                    disabled={uploading}
                     className="px-6 py-2.5 bg-indigo-600 text-white rounded-xl font-bold text-sm hover:bg-indigo-700 transition-all flex items-center justify-center gap-2 disabled:bg-slate-300 shadow-sm cursor-pointer disabled:cursor-not-allowed"
                   >
                     {uploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <CloudUpload className="w-4 h-4" />}
                     {uploading ? 'Uploading to Zenodo...' : 'Final Upload to Zenodo'}
                   </button>
+                </div>
+
+                {/* AI Review Warning Box */}
+                <div className="mb-6 p-3.5 bg-amber-50 rounded-xl border border-amber-200/90 flex items-start gap-2.5 text-xs text-amber-900">
+                  <Sparkles className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <div className="leading-relaxed">
+                    <span className="font-bold text-amber-950">AI Accuracy Notice: </span>
+                    <span>AI models can make mistakes or hallucinate details. Please carefully inspect all fields below (title, authors, abstract, keywords, and bios) and make any necessary corrections prior to final submission.</span>
+                  </div>
                 </div>
 
                 {editableMetadata?.notice && (
@@ -1765,17 +1936,17 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
 
                 <button
                   onClick={handleUploadToZenodo}
-                  disabled={uploading || !zenodoApiKey}
+                  disabled={uploading}
                   className="mt-8 w-full px-6 py-3.5 bg-indigo-600 text-white rounded-xl font-semibold text-sm hover:bg-indigo-700 transition-all flex items-center justify-center gap-2 disabled:bg-slate-300 shadow-sm cursor-pointer disabled:cursor-not-allowed"
                 >
                   {uploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <CloudUpload className="w-4 h-4" />}
                   {uploading ? 'Uploading to Zenodo...' : 'Upload to Zenodo'}
                 </button>
                 {!zenodoApiKey && (
-                  <p className="text-xs text-red-500 mt-2 text-center font-medium">Please save your Zenodo API key above to enable upload.</p>
+                  <p className="text-xs text-amber-700 mt-2 text-center font-medium">Zenodo Personal Access Token is required to complete publication. Click above to configure keys.</p>
                 )}
               </div>
-            )}
+            ) : null}
           </motion.div>
         )}
       </AnimatePresence>

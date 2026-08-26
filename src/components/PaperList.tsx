@@ -20,7 +20,7 @@ export interface Paper {
   originalCreatedAt?: string;
 }
 
-export default function PaperList({ user, refreshTrigger }: { user: User; refreshTrigger?: number }) {
+export default function PaperList({ user, refreshTrigger }: { user: User | null; refreshTrigger?: number }) {
   const [papers, setPapers] = useState<Paper[]>([]);
   const [loading, setLoading] = useState(false);
   const [deletingDuplicates, setDeletingDuplicates] = useState(false);
@@ -50,12 +50,16 @@ export default function PaperList({ user, refreshTrigger }: { user: User; refres
 
   const loadZenodoApiKey = async () => {
     try {
-      const docRef = doc(db, 'users', user.uid, 'settings', 'zenodo');
-      const docSnap = await getDoc(docRef);
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        setZenodoApiKey(data.zenodoApiKey || '');
+      let key = localStorage.getItem('zenodo_api_key') || '';
+      if (user && user.uid) {
+        const docRef = doc(db, 'users', user.uid, 'settings', 'zenodo');
+        const docSnap = await getDoc(docRef);
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          if (data.zenodoApiKey) key = data.zenodoApiKey;
+        }
       }
+      setZenodoApiKey(key);
     } catch (err) {
       console.error('Failed to load API Keys:', err);
     }
@@ -67,39 +71,76 @@ export default function PaperList({ user, refreshTrigger }: { user: User; refres
       // 1. Get set of deleted paper IDs
       const deletedIds = new Set<string>();
       try {
-        const deletedSnap = await getDocs(collection(db, `users/${user.uid}/deleted_papers`));
-        deletedSnap.forEach((docSnap) => {
-          deletedIds.add(docSnap.id);
-        });
-      } catch (dErr) {
-        console.warn('Failed to fetch deleted_papers set:', dErr);
+        const localDeleted = JSON.parse(localStorage.getItem('zenuploader_deleted_papers') || '[]');
+        if (Array.isArray(localDeleted)) {
+          localDeleted.forEach(id => deletedIds.add(String(id)));
+        }
+      } catch (e) {}
+
+      if (user && user.uid) {
+        try {
+          const deletedSnap = await getDocs(collection(db, `users/${user.uid}/deleted_papers`));
+          deletedSnap.forEach((docSnap) => {
+            deletedIds.add(docSnap.id);
+          });
+        } catch (dErr) {
+          console.warn('Failed to fetch deleted_papers set:', dErr);
+        }
       }
 
       const papersData: Paper[] = [];
       
       // Fetch from Firestore
-      const colPath = `users/${user.uid}/uploads`;
-      const q = query(collection(db, colPath));
-      const querySnapshot = await getDocs(q);
-      querySnapshot.forEach((docSnap) => {
-        if (!deletedIds.has(docSnap.id)) {
-          const data = docSnap.data();
-          papersData.push({ 
-            id: docSnap.id, 
-            title: data.title || data.metadata?.title || 'Untitled',
-            metadata: data.metadata || {}, 
-            status: data.status || 'uploaded', 
-            source: 'firestore',
-            createdAt: data.createdAt || new Date().toISOString() 
+      if (user && user.uid) {
+        try {
+          const colPath = `users/${user.uid}/uploads`;
+          const q = query(collection(db, colPath));
+          const querySnapshot = await getDocs(q);
+          querySnapshot.forEach((docSnap) => {
+            if (!deletedIds.has(docSnap.id)) {
+              const data = docSnap.data();
+              papersData.push({ 
+                id: docSnap.id, 
+                title: data.title || data.metadata?.title || 'Untitled',
+                metadata: data.metadata || {}, 
+                status: data.status || 'uploaded', 
+                source: 'firestore',
+                createdAt: data.createdAt || new Date().toISOString() 
+              });
+            }
+          });
+        } catch (fErr) {
+          console.warn('Failed to fetch Firestore uploads:', fErr);
+        }
+      }
+
+      // Fetch local uploads from localStorage
+      try {
+        const localUploads = JSON.parse(localStorage.getItem('zenuploader_local_uploads') || '[]');
+        if (Array.isArray(localUploads)) {
+          localUploads.forEach((data: any) => {
+            const localId = data.id || `local_${data.createdAt}`;
+            if (!deletedIds.has(localId) && !papersData.some(p => p.id === localId)) {
+              papersData.push({
+                id: localId,
+                title: data.title || data.metadata?.title || 'Untitled',
+                metadata: data.metadata || {},
+                status: data.status || 'uploaded',
+                source: 'firestore',
+                createdAt: data.createdAt || new Date().toISOString()
+              });
+            }
           });
         }
-      });
+      } catch (lErr) {
+        console.warn('Failed to parse localUploads from localStorage:', lErr);
+      }
 
-      // Fetch from Zenodo
+      // Fetch from Zenodo via server endpoint
       const cleanZenodoKey = zenodoApiKey ? zenodoApiKey.replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/[^\x21-\x7E]/g, '').trim() : '';
       if (cleanZenodoKey) {
         try {
-          const response = await fetch('https://zenodo.org/api/deposit/depositions?access_token=' + encodeURIComponent(cleanZenodoKey) + '&size=100');
+          const response = await fetch('/api/get-zenodo-papers?zenodoApiKey=' + encodeURIComponent(cleanZenodoKey));
           if (response.ok) {
             const zenodoPapers = await response.json();
             if (Array.isArray(zenodoPapers)) {
@@ -183,30 +224,58 @@ export default function PaperList({ user, refreshTrigger }: { user: User; refres
     setPapers(prev => prev.filter(p => !idsToDelete.includes(p.id)));
 
     try {
+      // 1. Update localStorage deleted_papers and remove from zenuploader_local_uploads
+      try {
+        const localDeleted = JSON.parse(localStorage.getItem('zenuploader_deleted_papers') || '[]');
+        const localUploads = JSON.parse(localStorage.getItem('zenuploader_local_uploads') || '[]');
+        
+        idsToDelete.forEach(id => {
+          const safeId = String(id).replace(/[^a-zA-Z0-9_-]/g, '_');
+          if (!localDeleted.includes(safeId)) localDeleted.push(safeId);
+          if (!localDeleted.includes(String(id))) localDeleted.push(String(id));
+        });
+        localStorage.setItem('zenuploader_deleted_papers', JSON.stringify(localDeleted));
+
+        if (Array.isArray(localUploads)) {
+          const filteredLocal = localUploads.filter((item: any) => {
+            const itemId = item.id || `local_${item.createdAt}`;
+            return !idsToDelete.includes(itemId) && !idsToDelete.includes(String(itemId));
+          });
+          localStorage.setItem('zenuploader_local_uploads', JSON.stringify(filteredLocal));
+        }
+      } catch (e) {
+        console.warn('Failed to update localStorage during batch duplicate delete:', e);
+      }
+
       for (const paper of duplicatePapers) {
         const safeId = String(paper.id).replace(/[^a-zA-Z0-9_-]/g, '_');
-        // Record as deleted so Zenodo API refetch ignores it
-        try {
-          await setDoc(doc(db, 'users', user.uid, 'deleted_papers', safeId), {
-            deletedAt: new Date().toISOString(),
-            title: paper.title || ''
-          });
-        } catch (err) {
-          console.warn('Firestore set deleted_papers failed:', paper.id, err);
+        
+        // Record in Firestore if user is authenticated
+        if (user && user.uid) {
+          try {
+            await setDoc(doc(db, 'users', user.uid, 'deleted_papers', safeId), {
+              deletedAt: new Date().toISOString(),
+              title: paper.title || ''
+            });
+          } catch (err) {
+            console.warn('Firestore set deleted_papers failed:', paper.id, err);
+          }
+
+          try {
+            await deleteDoc(doc(db, 'users', user.uid, 'uploads', safeId));
+          } catch (err) {
+            console.warn('Firestore delete failed for duplicate:', paper.id, err);
+          }
         }
 
-        // Delete from Firestore uploads
-        try {
-          await deleteDoc(doc(db, 'users', user.uid, 'uploads', safeId));
-        } catch (err) {
-          console.warn('Firestore delete failed for duplicate:', paper.id, err);
-        }
-
-        // Delete from Zenodo if key present
+        // Delete from Zenodo if key present via server route
         if (cleanZenodoKey) {
           try {
-            const url = `https://zenodo.org/api/deposit/depositions/${paper.id}?access_token=${encodeURIComponent(cleanZenodoKey)}`;
-            await fetch(url, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+            await fetch('/api/delete-zenodo-paper', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ depositionId: paper.id, zenodoApiKey: cleanZenodoKey })
+            });
           } catch (err) {
             console.warn('Zenodo delete failed for duplicate:', paper.id, err);
           }
@@ -230,28 +299,52 @@ export default function PaperList({ user, refreshTrigger }: { user: User; refres
 
     try {
       const safeId = String(paper.id).replace(/[^a-zA-Z0-9_-]/g, '_');
-      // 1. Record in deleted_papers collection
+
+      // 1. Record in local storage deleted list and remove from localUploads
       try {
-        await setDoc(doc(db, 'users', user.uid, 'deleted_papers', safeId), {
-          deletedAt: new Date().toISOString(),
-          title: paper.title || ''
-        });
-      } catch (err) {
-        console.warn('Firestore deleted_papers write error:', err);
+        const localDeleted = JSON.parse(localStorage.getItem('zenuploader_deleted_papers') || '[]');
+        if (!localDeleted.includes(safeId)) localDeleted.push(safeId);
+        if (!localDeleted.includes(String(paper.id))) localDeleted.push(String(paper.id));
+        localStorage.setItem('zenuploader_deleted_papers', JSON.stringify(localDeleted));
+
+        const localUploads = JSON.parse(localStorage.getItem('zenuploader_local_uploads') || '[]');
+        if (Array.isArray(localUploads)) {
+          const filteredLocal = localUploads.filter((item: any) => {
+            const itemId = item.id || `local_${item.createdAt}`;
+            return itemId !== paper.id && itemId !== safeId;
+          });
+          localStorage.setItem('zenuploader_local_uploads', JSON.stringify(filteredLocal));
+        }
+      } catch (e) {
+        console.warn('Failed to update localStorage during paper delete:', e);
       }
 
-      // 2. Delete from Firestore uploads
-      try {
-        await deleteDoc(doc(db, 'users', user.uid, 'uploads', safeId));
-      } catch (err) {
-        console.warn('Firestore delete error:', err);
+      // 2. Record in Firestore if authenticated
+      if (user && user.uid) {
+        try {
+          await setDoc(doc(db, 'users', user.uid, 'deleted_papers', safeId), {
+            deletedAt: new Date().toISOString(),
+            title: paper.title || ''
+          });
+        } catch (err) {
+          console.warn('Firestore deleted_papers write error:', err);
+        }
+
+        try {
+          await deleteDoc(doc(db, 'users', user.uid, 'uploads', safeId));
+        } catch (err) {
+          console.warn('Firestore delete error:', err);
+        }
       }
 
-      // 3. Delete from Zenodo if present
+      // 3. Delete from Zenodo if present via server route
       if (cleanZenodoKey) {
         try {
-          const url = `https://zenodo.org/api/deposit/depositions/${paper.id}?access_token=${encodeURIComponent(cleanZenodoKey)}`;
-          await fetch(url, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+          await fetch('/api/delete-zenodo-paper', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ depositionId: paper.id, zenodoApiKey: cleanZenodoKey })
+          });
         } catch (err) {
           console.warn('Zenodo delete error:', err);
         }
@@ -290,14 +383,41 @@ export default function PaperList({ user, refreshTrigger }: { user: User; refres
 
       const updatedTitle = editingPaper.title || finalMetadata.title || 'Untitled';
       finalMetadata.title = updatedTitle;
-
-      // Update Firestore
       const safePaperId = String(editingPaper.id).replace(/[^a-zA-Z0-9_-]/g, '_');
-      const paperRef = doc(db, 'users', user.uid, 'uploads', safePaperId);
-      await setDoc(paperRef, {
-        title: updatedTitle,
-        metadata: finalMetadata
-      }, { merge: true });
+
+      // Update localStorage
+      try {
+        const localUploads = JSON.parse(localStorage.getItem('zenuploader_local_uploads') || '[]');
+        if (Array.isArray(localUploads)) {
+          const updatedLocal = localUploads.map((item: any) => {
+            const itemId = item.id || `local_${item.createdAt}`;
+            if (itemId === editingPaper.id || itemId === safePaperId) {
+              return {
+                ...item,
+                title: updatedTitle,
+                metadata: finalMetadata
+              };
+            }
+            return item;
+          });
+          localStorage.setItem('zenuploader_local_uploads', JSON.stringify(updatedLocal));
+        }
+      } catch (e) {
+        console.warn('Failed to update localStorage during fix:', e);
+      }
+
+      // Update Firestore if user logged in
+      if (user && user.uid) {
+        try {
+          const paperRef = doc(db, 'users', user.uid, 'uploads', safePaperId);
+          await setDoc(paperRef, {
+            title: updatedTitle,
+            metadata: finalMetadata
+          }, { merge: true });
+        } catch (fErr) {
+          console.warn('Firestore update paper error:', fErr);
+        }
+      }
 
       // Update Zenodo via server endpoint if key present
       const cleanZenodoKey = zenodoApiKey ? zenodoApiKey.replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/[^\x21-\x7E]/g, '').trim() : '';
