@@ -1,9 +1,11 @@
 {
   "projectId": "gen-lang-client-0942057540",
   "appId": "1:427285749550:web:b46ee5d48c4ea59752a4bf",
+  "apiKey": "AIzaSyAEdKNfAnrO4xDUl_uboHvVULrNxUk-JDg",
   "authDomain": "gen-lang-client-0942057540.firebaseapp.com",
   "firestoreDatabaseId": "ai-studio-zenuploader-afc267c8-ccc3-4cf3-a945-b0030f597d78",
   "storageBucket": "gen-lang-client-0942057540.firebasestorage.app",
   "messagingSenderId": "427285749550",
-  "measurementId": ""
+  "measurementId": "",
+  "oAuthClientId": "427285749550-3ri6ltui7q1pe0hqdm2u0eeugd4m74ho.apps.googleusercontent.com"
 }
