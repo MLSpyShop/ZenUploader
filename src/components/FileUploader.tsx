@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { db } from '../lib/db';
-import { Upload, CheckCircle2, Loader2, AlertCircle, CloudUpload, Key, Lock, Plus, Trash2, Globe, FileText, Tag, BookOpen, Link, HelpCircle, Search, ExternalLink, Sparkles, UserCheck, FolderOpen } from 'lucide-react';
+import { Upload, CheckCircle2, Loader2, AlertCircle, CloudUpload, Key, Lock, Plus, Trash2, Globe, FileText, Tag, BookOpen, Link, HelpCircle, Search, ExternalLink, Sparkles, UserCheck, FolderOpen, X, RotateCcw, Layers, ArrowUpRight } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { initAuth, googleSignIn } from '../auth';
 import { User } from 'firebase/auth';
@@ -59,6 +59,144 @@ function getSafeHref(urlStr: any): string {
   return '#';
 }
 
+function isJunkTitle(str: string): boolean {
+  if (!str || typeof str !== 'string') return true;
+  const trimmed = str.trim();
+  if (trimmed.length < 4) return true;
+  if (!/[a-zA-Z]{3,}/.test(trimmed)) return true;
+
+  // Internal PDF font/stream markers
+  if (/Identity-H|CIDInit|FontName|Helvetica|Times-Roman|Courier|ProcSet|Encoding|Type1|TrueType|Adobe|CoreGraphics|XObject|trailer|xref|startxref|obj\b|endobj\b|stream\b|endstream\b|PDF-1\.|CMap|CIDFont/i.test(trimmed)) {
+    return true;
+  }
+
+  // Journal / Conference / Publisher banner headers
+  if (/^(?:ieee\s+trans|acm\s+trans|proceedings\s+of|journal\s+of|international\s+conference|springer|elsevier|wiley|nature\s+publishing|nature\s+communications|science\s+advances|plos\s+one|frontiers\s+in|mdpi|cell\s+press|biomed\s+central|annual\s+review)/i.test(trimmed)) {
+    return true;
+  }
+
+  // Volume / Issue / Page metadata
+  if (/^(?:vol\.\s*\d+|volume\s+\d+|issue\s+\d+|no\.\s*\d+|pp\.\s*\d+|page\s+\d+|\d+\s+of\s+\d+|issn\s*[:\d-]+|isbn\s*[:\d-]+)/i.test(trimmed)) {
+    return true;
+  }
+
+  // Preprint / Status headers
+  if (/^(?:arxiv:\s*\d|biorxiv\s+preprint|medrxiv\s+preprint|chemrxiv|ssrn|under\s+review|preprint\.|manuscript\s+received|accepted\s+for\s+publication|draft\s+version)/i.test(trimmed)) {
+    return true;
+  }
+
+  // Copyright / Downloaded lines
+  if (/^(?:copyright\s+©?|all\s+rights\s+reserved|published\s+by|distributed\s+under|open\s+access|creative\s+commons|cc\s+by|downloaded\s+from|available\s+online\s+at)/i.test(trimmed)) {
+    return true;
+  }
+
+  // URLs / DOIs
+  if (/^(?:https?:\/\/|www\.|doi\s*:|10\.\d{4,9}\/)/i.test(trimmed)) {
+    return true;
+  }
+
+  // Section headings mistaken for title
+  if (/^(?:abstract|summary|introduction|keywords|index\s+terms|table\s+of\s+contents|references|acknowledgments|contents|appendix|conclusion|background|results|discussion)$/i.test(trimmed)) {
+    return true;
+  }
+
+  const alphaChars = trimmed.replace(/[^a-zA-Z]/g, '').length;
+  if (alphaChars < trimmed.length * 0.40) return true;
+
+  return false;
+}
+
+function cleanTitleFromFilename(filename: string): string {
+  if (!filename || typeof filename !== 'string') return 'Research Paper';
+  let name = filename.replace(/\.[a-zA-Z0-9]+$/i, '').trim();
+
+  // Remove arXiv IDs: e.g., "2303.08774v1_", "2303.08774_"
+  name = name.replace(/^\d{4}\.\d{4,5}(?:v\d+)?[-_]?/i, '');
+
+  // Remove leading DOIs or dates: e.g., "10.1145_3534578_", "2023_05_12_"
+  name = name.replace(/^10\.\d{4,9}[-_a-zA-Z0-9.]+[-_]/i, '');
+  name = name.replace(/^\d{4}[-_]\d{2}[-_]\d{2}[-_]?/, '');
+
+  // Remove leading random hashes: e.g. "a1b2c3d4e5f6_"
+  name = name.replace(/^[a-f0-9]{10,}[-_]/i, '');
+
+  // Replace separators with spaces
+  name = name.replace(/[-_+]/g, ' ').replace(/%20/g, ' ');
+
+  // Split CamelCase into words
+  name = name.replace(/([a-z])([A-Z])/g, '$1 $2');
+
+  // Collapse whitespace
+  name = name.replace(/\s+/g, ' ').trim();
+
+  if (!name || /^(?:document|paper|manuscript|download|untitled|file|main|fulltext|output)$/i.test(name)) {
+    return 'Research Paper';
+  }
+
+  return name.split(' ')
+    .map(w => {
+      if (/^(a|an|the|and|or|but|in|on|at|to|for|with|by|of|from|as|into|via)$/i.test(w)) {
+        return w.toLowerCase();
+      }
+      return w.charAt(0).toUpperCase() + w.slice(1);
+    })
+    .join(' ')
+    .replace(/^([a-z])/, m => m.toUpperCase());
+}
+
+function cleanExtractedTitle(rawTitle: string, filename: string = ''): string {
+  if (!rawTitle || typeof rawTitle !== 'string') {
+    return cleanTitleFromFilename(filename);
+  }
+
+  let t = rawTitle.replace(/\r\n/g, ' ').replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
+
+  // Strip surrounding quotes, brackets, parentheses
+  t = t.replace(/^["'“”‘`«\[(]+|["'“”’`»\])]+$/g, '').trim();
+
+  // Strip leading "Title:" or "Paper Title:"
+  t = t.replace(/^(?:paper\s+)?title\s*[:.-]\s*/i, '').trim();
+
+  // Strip leading publisher / journal prefixes
+  t = t.replace(/^(?:ieee\s+transactions\s+on[^\n:–-]+|proceedings\s+of[^\n:–-]+|arxiv:\s*\S+)\s*[:–-]\s*/i, '').trim();
+
+  // Strip trailing publisher tags
+  t = t.replace(/\s*[-–|]\s*(?:ieee|acm|springer|elsevier|arxiv|biorxiv|science|nature|wiley|plos).*$/i, '').trim();
+
+  // Fix hyphenated line breaks
+  t = t.replace(/-\s+/g, '-');
+
+  // Strip leading numbering
+  t = t.replace(/^(?:\d+\.|\d+\s*[-:]|paper\s*#?\d+[:\s])\s*/i, '').trim();
+
+  if (isJunkTitle(t) || t.length < 5) {
+    return cleanTitleFromFilename(filename);
+  }
+
+  if (t.length > 300) {
+    t = t.substring(0, 300).trim();
+  }
+
+  return t || cleanTitleFromFilename(filename);
+}
+
+function sanitizeAuthorName(rawName: string): string {
+  if (!rawName || typeof rawName !== 'string') return '';
+  let n = rawName.trim();
+  n = n.replace(/[\d,*†‡§#]+$/g, '').replace(/^[\d,*†‡§#]+/g, '').trim();
+  n = n.replace(/\s+[\d,*†‡§#]+(?=\s|$)/g, ' ').trim();
+  n = n.replace(/\s*<[^>]+@?[^>]*>/g, '').replace(/\s*\S+@\S+/g, '').trim();
+  n = n.replace(/[,;]+$/g, '').trim();
+
+  if (/^(?:Abstract|Introduction|Department|University|Institute|College|Faculty|Center|Laboratory|School|Hospital|Corporation|Inc|LLC|Ltd|IEEE|ACM|Springer|Elsevier|Nature|Science|Author|Authors|Member|Fellow|Student|Senior|Corresponding|Keywords|Index Terms|Table|Figure|Vol|Volume|Issue|Page|Preprint|ArXiv)$/i.test(n)) {
+    return '';
+  }
+  if (n.length < 3 || n.length > 60) return '';
+  if (!/[a-zA-Z]{2,}/.test(n)) return '';
+
+  return n;
+}
+
 function parseMetadataFromBrowserBuffer(buffer: ArrayBuffer, filename: string = 'paper.pdf'): any {
   let extractedText = '';
   try {
@@ -72,7 +210,7 @@ function parseMetadataFromBrowserBuffer(buffer: ArrayBuffer, filename: string = 
     if (matches) {
       for (const m of matches) {
         const cleaned = m.slice(1, -1).replace(/\\([0-7]{3}|[()\\nrtb])/g, ' ').trim();
-        if (cleaned.length > 3 && /[a-zA-Z]{3,}/.test(cleaned)) {
+        if (cleaned.length > 3 && /[a-zA-Z]{3,}/.test(cleaned) && !isJunkTitle(cleaned)) {
           textBlocks.push(cleaned);
         }
       }
@@ -83,64 +221,86 @@ function parseMetadataFromBrowserBuffer(buffer: ArrayBuffer, filename: string = 
   }
 
   const cleanText = (extractedText || '').replace(/\r\n/g, '\n').trim();
-  const lines = cleanText.split('\n').map(l => l.trim()).filter(Boolean);
+  const rawLines = cleanText.split('\n').map(l => l.trim()).filter(Boolean);
 
   let title = '';
-  if (lines.length > 0) {
-    const candidateLines = lines.slice(0, 5).filter(l => !/^page\s+\d+/i.test(l) && l.length > 5);
-    if (candidateLines.length > 0) {
-      title = candidateLines.slice(0, 2).join(' ');
+  let titleLineEndIdx = 0;
+  
+  const titleParts: string[] = [];
+  for (let i = 0; i < Math.min(rawLines.length, 25); i++) {
+    const line = rawLines[i];
+    if (isJunkTitle(line)) continue;
+    if (/^(?:abstract|summary)\b/i.test(line)) break;
+    if (/@|http:\/\/|https:\/\/|doi\.org/i.test(line)) break;
+    if (/\b(?:university|department|institute|laboratory|faculty|college)\b/i.test(line) && titleParts.length > 0) {
+      break;
     }
-  }
-  if (!title && filename) {
-    title = filename.replace(/\.pdf$/i, '').replace(/[-_]/g, ' ');
-  }
-  if (!title) {
-    title = 'Untitled Research Paper';
+    titleParts.push(line);
+    titleLineEndIdx = i;
+    if (titleParts.join(' ').length > 60 && !line.endsWith('-')) break;
+    if (titleParts.length >= 3) break;
   }
 
+  title = cleanExtractedTitle(titleParts.join(' '), filename);
+
   let abstract = '';
-  const abstractMatch = cleanText.match(/(?:abstract|summary)[\s:-]+([\s\S]{50,2000}?)(?=\n\s*(?:1[\s.]+|introduction|keywords|index terms|1\.\s+introduction)|$)/i);
+  const abstractMatch = cleanText.match(/(?:abstract|summary)\s*[:.\-—\s]\s*([\s\S]{50,4000}?)(?=\n\s*(?:1[\s.]+|1\.\s+introduction|introduction|keywords|index\s+terms|key\s+words|categories|background|\n\s*\n\s*[A-Z][a-z]+)|$)/i);
   if (abstractMatch) {
-    abstract = abstractMatch[1].replace(/[\r\n]+/g, ' ').trim();
+    abstract = abstractMatch[1].replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
   }
   if (!abstract) {
-    abstract = 'Open-access research paper uploaded via ZenUploader.';
+    const afterTitle = rawLines.slice(titleLineEndIdx + 1, titleLineEndIdx + 15).join(' ');
+    if (afterTitle.length > 100) {
+      abstract = afterTitle.substring(0, 500) + '...';
+    } else {
+      abstract = `${title}. Open-access scientific paper archived for long-term discovery and citation on Zenodo.`;
+    }
   }
 
   const keywords: string[] = [];
-  const kwMatch = cleanText.match(/(?:keywords|index terms|key words)[\s:-]+([^\n\r]{5,200})/i);
+  const kwMatch = cleanText.match(/(?:keywords|index\s+terms|key\s+words)\s*[:.\-—\s]\s*([^\n\r]{5,300})/i);
   if (kwMatch) {
     kwMatch[1].split(/[,;•|]/).forEach(k => {
-      const cleaned = k.trim();
-      if (cleaned && cleaned.length > 1 && cleaned.length < 60) {
+      const cleaned = k.trim().replace(/^[-—*]\s*/, '');
+      if (cleaned && cleaned.length > 2 && cleaned.length < 60 && !/^(keywords|index terms)$/i.test(cleaned)) {
         keywords.push(cleaned);
       }
     });
   }
 
   const authors: any[] = [];
-  if (lines.length > 2) {
-    const authorSection = lines.slice(1, 10).join(' ');
-    const potentialNames = authorSection.match(/[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}/g);
-    if (potentialNames && potentialNames.length > 0) {
-      const uniqueNames = Array.from(new Set(potentialNames)).slice(0, 6);
-      uniqueNames.forEach(name => {
-        if (!/Abstract|Introduction|University|Department|IEEE|ACM|Springer|arxiv/i.test(name)) {
-          authors.push({ name, affiliation: '', url: '' });
-        }
-      });
+  const linesBetween = rawLines.slice(titleLineEndIdx + 1, Math.min(rawLines.length, titleLineEndIdx + 20));
+  for (const line of linesBetween) {
+    if (/^(?:abstract|summary)\b/i.test(line)) break;
+    if (/@|https?:\/\/|doi\.org|\b(?:department|university|institute|laboratory|faculty|school|hospital|center|college|avenue|street|box|zip|usa|china|germany|france|canada|uk)\b/i.test(line)) {
+      continue;
     }
+    if (isJunkTitle(line)) continue;
+
+    const candidateNames = line.split(/[,;&•]|\band\b/i);
+    for (const rawName of candidateNames) {
+      const cleanedName = sanitizeAuthorName(rawName);
+      if (cleanedName && !authors.some(a => a.name.toLowerCase() === cleanedName.toLowerCase())) {
+        authors.push({ name: cleanedName, affiliation: '', url: '' });
+      }
+    }
+    if (authors.length >= 8) break;
   }
+
   if (authors.length === 0) {
-    authors.push({ name: 'Research Author', affiliation: '', url: '' });
+    const fnAuthorMatch = filename.match(/^([A-Z][a-z]+)(?:_et_al|_and_|\s)/);
+    if (fnAuthorMatch && !/^(Paper|Document|Manuscript|Download|Untitled|File)$/i.test(fnAuthorMatch[1])) {
+      authors.push({ name: fnAuthorMatch[1], affiliation: '', url: '' });
+    } else {
+      authors.push({ name: 'Lead Author', affiliation: '', url: '' });
+    }
   }
 
   const doiMatch = cleanText.match(/10\.\d{4,9}\/[-._;()/:A-Za-z0-9]+/);
   const identifiers = doiMatch ? [{ identifier: doiMatch[0], scheme: 'doi' }] : [];
 
-  const yearMatch = cleanText.match(/\b(19\d\d|20\d\d)\b/);
-  const publicationDate = yearMatch ? yearMatch[1] : new Date().toISOString().split('T')[0];
+  const yearMatch = cleanText.match(/\b(20\d\d|19\d\d)\b/);
+  const publicationDate = yearMatch ? `${yearMatch[1]}-01-01` : new Date().toISOString().split('T')[0];
 
   return {
     title,
@@ -148,14 +308,14 @@ function parseMetadataFromBrowserBuffer(buffer: ArrayBuffer, filename: string = 
     authors,
     publicationDate,
     fundingInformation: '',
-    tldr: `${title}. Key findings and open-access research data.`,
+    tldr: abstract ? (abstract.length > 200 ? abstract.substring(0, 200) + '...' : abstract) : `${title}. Open-access research data.`,
     abstract,
     summary: abstract,
     keyTakeaways: ['Open-access research contribution', 'Peer-reviewed methodology & findings'],
-    novelties: ['Scientific contribution to the field'],
+    novelties: [`Scientific methodology and contributions in ${title}`],
     glossary: [],
     faq: [],
-    longTailKeywords: keywords.length > 0 ? keywords : ['research paper', 'zenodo publication'],
+    longTailKeywords: keywords.length > 0 ? keywords : [title.toLowerCase(), 'research paper', 'zenodo publication'],
     datasetsAndBenchmarks: [],
     practicalApplications: [],
     methodology: '',
@@ -176,6 +336,34 @@ function parseMetadataFromBrowserBuffer(buffer: ArrayBuffer, filename: string = 
 export default function FileUploader({ user, onUploadSuccess }: { user: User | null; onUploadSuccess?: () => void }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const apiKeysRef = useRef<HTMLDivElement>(null);
+
+  const googleUserName = user?.displayName || (user?.email ? user.email.split('@')[0].replace(/[._-]/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : '');
+
+  const [savedAuthorProfile, setSavedAuthorProfile] = useState<{ name: string; affiliation: string; url: string; whoisBio?: string } | null>(null);
+  const [savingAuthorProfile, setSavingAuthorProfile] = useState(false);
+  const [authorProfileSavedMsg, setAuthorProfileSavedMsg] = useState(false);
+
+  const applySavedProfile = (metadata: any) => {
+    if (!savedAuthorProfile || !metadata || !metadata.authors) return metadata;
+    const authors = [...metadata.authors];
+    if (authors.length > 0 && (authors[0].name === 'Lead Author' || !authors[0].name || authors[0].name === googleUserName)) {
+      authors[0] = {
+        name: savedAuthorProfile.name || authors[0].name,
+        affiliation: savedAuthorProfile.affiliation || authors[0].affiliation || '',
+        url: savedAuthorProfile.url || authors[0].url || '',
+        whoisBio: savedAuthorProfile.whoisBio || authors[0].whoisBio || ''
+      };
+    } else if (authors.length === 0 && savedAuthorProfile.name) {
+      authors.push({
+        name: savedAuthorProfile.name,
+        affiliation: savedAuthorProfile.affiliation || '',
+        url: savedAuthorProfile.url || '',
+        whoisBio: savedAuthorProfile.whoisBio || ''
+      });
+    }
+    return { ...metadata, authors };
+  };
+
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState<any>(null);
@@ -475,7 +663,80 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
 
   useEffect(() => {
     loadZenodoApiKey(user?.uid);
+    loadPermanentAuthorProfile(user?.uid);
   }, [user]);
+
+  const loadPermanentAuthorProfile = async (uid?: string) => {
+    try {
+      let profile: any = null;
+      const localProfile = localStorage.getItem('zenuploader_saved_author_profile');
+      if (localProfile) {
+        try { profile = JSON.parse(localProfile); } catch (e) {}
+      }
+      if (uid) {
+        const docRef = doc(db, 'users', uid, 'profile', 'authorProfile');
+        const docSnap = await getDoc(docRef);
+        if (docSnap.exists()) {
+          const cloudData = docSnap.data();
+          if (cloudData && cloudData.name) {
+            profile = cloudData;
+            localStorage.setItem('zenuploader_saved_author_profile', JSON.stringify(cloudData));
+          }
+        }
+      }
+      if (profile) {
+        setSavedAuthorProfile(profile);
+      }
+    } catch (err) {
+      console.error('Failed to load permanent author profile:', err);
+    }
+  };
+
+  const persistPermanentAuthorProfile = async (profileData: { name: string; affiliation: string; url: string; whoisBio?: string }) => {
+    try {
+      setSavingAuthorProfile(true);
+      localStorage.setItem('zenuploader_saved_author_profile', JSON.stringify(profileData));
+      setSavedAuthorProfile(profileData);
+      if (user && user.uid) {
+        const docRef = doc(db, 'users', user.uid, 'profile', 'authorProfile');
+        await setDoc(docRef, profileData, { merge: true });
+      }
+      setAuthorProfileSavedMsg(true);
+      setTimeout(() => setAuthorProfileSavedMsg(false), 3500);
+    } catch (err) {
+      console.error('Failed to save permanent author profile to cloud storage:', err);
+      setError('Failed to save permanent author profile.');
+    } finally {
+      setSavingAuthorProfile(false);
+    }
+  };
+
+  useEffect(() => {
+    const handleLoadPaper = (e: any) => {
+      let data = e.detail?.metadata || e.detail;
+      if (data) {
+        data = applySavedProfile(data);
+        setEditableMetadata(data);
+        setResult(data);
+        setError(null);
+        setZenodoReceipt(null);
+        const topEl = document.getElementById('uploader-top') || document.getElementById('pdf-file-picker');
+        topEl?.scrollIntoView({ behavior: 'smooth' });
+      }
+    };
+
+    const handleClearDocumentEvent = () => {
+      handleStartOver();
+    };
+
+    window.addEventListener('zenuploader_load_paper', handleLoadPaper);
+    window.addEventListener('zenuploader_clear_document', handleClearDocumentEvent);
+
+    return () => {
+      window.removeEventListener('zenuploader_load_paper', handleLoadPaper);
+      window.removeEventListener('zenuploader_clear_document', handleClearDocumentEvent);
+    };
+  }, []);
 
   const loadZenodoApiKey = async (uid?: string) => {
     try {
@@ -559,21 +820,55 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
 
   const savePaperToHistory = async (metadata: any, status: string = 'processed', receipt: any = null) => {
     const rawDocId = receipt?.depositionId || receipt?.record_id || receipt?.id || Date.now();
-    const docId = String(rawDocId).replace(/[^a-zA-Z0-9_-]/g, '_') || `paper_${Date.now()}`;
-    const paperObj = {
-      id: docId,
-      title: metadata?.title || 'Untitled Research Paper',
-      metadata: metadata,
-      status: status,
-      createdAt: new Date().toISOString()
-    };
+    const newDocId = String(rawDocId).replace(/[^a-zA-Z0-9_-]/g, '_') || `paper_${Date.now()}`;
+    const depositionId = receipt?.depositionId || receipt?.id || (status === 'uploaded' ? newDocId : undefined);
+    const zenodoDoi = receipt?.doi || metadata?.doi || undefined;
+    const environment = receipt?.environment || (receipt?.doi?.includes('5072') ? 'sandbox' : 'production');
+    const zenodoUrl = receipt?.links?.html || receipt?.links?.record_html || (depositionId ? `https://${environment === 'sandbox' ? 'sandbox.' : ''}zenodo.org/deposit/${depositionId}` : undefined);
 
-    // 1. Save to localStorage for instant local availability
+    const title = metadata?.title || 'Untitled Research Paper';
+    const normTitle = title.toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
+
+    // 1. Update localStorage without creating duplicates
+    let resolvedDocId = newDocId;
     try {
       const localUploads = JSON.parse(localStorage.getItem('zenuploader_local_uploads') || '[]');
-      const filtered = Array.isArray(localUploads) ? localUploads.filter((item: any) => item.id !== docId) : [];
-      filtered.unshift(paperObj);
-      localStorage.setItem('zenuploader_local_uploads', JSON.stringify(filtered));
+      
+      // Find existing match by deposition ID or normalized title
+      const existingIdx = localUploads.findIndex((item: any) => {
+        if (depositionId && item.zenodoRecordId === String(depositionId)) return true;
+        if (item.id === newDocId) return true;
+        const itemTitle = (item.title || item.metadata?.title || '').toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
+        return itemTitle === normTitle && normTitle.length > 4;
+      });
+
+      if (existingIdx !== -1) {
+        resolvedDocId = localUploads[existingIdx].id;
+        localUploads[existingIdx] = {
+          ...localUploads[existingIdx],
+          title: title,
+          metadata: metadata,
+          status: status === 'uploaded' ? 'uploaded' : localUploads[existingIdx].status,
+          zenodoRecordId: depositionId ? String(depositionId) : localUploads[existingIdx].zenodoRecordId,
+          zenodoDoi: zenodoDoi ? String(zenodoDoi) : localUploads[existingIdx].zenodoDoi,
+          zenodoUrl: zenodoUrl ? String(zenodoUrl) : localUploads[existingIdx].zenodoUrl,
+          environment: environment
+        };
+      } else {
+        const paperObj = {
+          id: resolvedDocId,
+          title: title,
+          metadata: metadata,
+          status: status,
+          createdAt: new Date().toISOString(),
+          zenodoRecordId: depositionId ? String(depositionId) : undefined,
+          zenodoDoi: zenodoDoi ? String(zenodoDoi) : undefined,
+          zenodoUrl: zenodoUrl ? String(zenodoUrl) : undefined,
+          environment: environment
+        };
+        localUploads.unshift(paperObj);
+      }
+      localStorage.setItem('zenuploader_local_uploads', JSON.stringify(localUploads));
     } catch (e) {
       console.warn('Failed to write to localStorage:', e);
     }
@@ -581,17 +876,25 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
     // 2. Save to Firestore if user logged in
     if (user && user.uid) {
       try {
-        const uploadRef = doc(db, 'users', user.uid, 'uploads', docId);
+        const uploadRef = doc(db, 'users', user.uid, 'uploads', resolvedDocId);
         await setDoc(uploadRef, {
-          title: metadata?.title || 'Untitled',
+          title: title,
           metadata: metadata,
           status: status,
-          createdAt: new Date().toISOString()
+          createdAt: new Date().toISOString(),
+          zenodoRecordId: depositionId ? String(depositionId) : null,
+          zenodoDoi: zenodoDoi ? String(zenodoDoi) : null,
+          zenodoUrl: zenodoUrl ? String(zenodoUrl) : null,
+          environment: environment
         }, { merge: true });
       } catch (err) {
         console.warn('Failed to save paper to Firestore:', err);
       }
     }
+
+    try {
+      window.dispatchEvent(new CustomEvent('zenuploader_refresh'));
+    } catch (e) {}
 
     if (onUploadSuccess) {
       onUploadSuccess();
@@ -627,6 +930,9 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
       const cleanGeminiKey = (geminiApiKey || '').trim();
       if (cleanGeminiKey) {
         formData.append('geminiApiKey', cleanGeminiKey);
+      }
+      if (googleUserName) {
+        formData.append('userName', googleUserName);
       }
       
       let data: any = null;
@@ -666,7 +972,14 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
         const arrayBuffer = await targetFile.arrayBuffer();
         const safeName = getSafeFileName(targetFile);
         data = parseMetadataFromBrowserBuffer(arrayBuffer, safeName);
+        if (googleUserName && data.authors && data.authors.length > 0 && (data.authors[0].name === 'Lead Author' || !data.authors[0].name)) {
+          data.authors[0].name = googleUserName;
+        }
+      } else if (googleUserName && data.authors && data.authors.length > 0 && (data.authors[0].name === 'Lead Author' || !data.authors[0].name)) {
+        data.authors[0].name = googleUserName;
       }
+
+      data = applySavedProfile(data);
 
       setResult(data);
       setEditableMetadata(data);
@@ -725,6 +1038,9 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
     setEditableMetadata(null);
     setError(null);
     setZenodoReceipt(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
   };
 
   const handleProcess = async () => {
@@ -753,13 +1069,14 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
     setError(null);
     try {
       const formData = new FormData();
+      const safeFileName = getSafeFileName(file);
       if (file instanceof File) {
-        formData.append('pdf', file);
+        formData.append('pdf', file, safeFileName);
       } else if (file instanceof Blob) {
-        formData.append('pdf', file, getSafeFileName(file));
+        formData.append('pdf', file, safeFileName);
       } else {
         const fallbackBlob = new Blob([file as any], { type: 'application/pdf' });
-        formData.append('pdf', fallbackBlob, 'document.pdf');
+        formData.append('pdf', fallbackBlob, safeFileName);
       }
       if (editableMetadata) {
         formData.append('metadata', JSON.stringify(editableMetadata));
@@ -787,7 +1104,7 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
       console.log('Uploaded to Zenodo:', data);
       
       try {
-        await savePaperToHistory(editableMetadata || { title: file.name }, 'uploaded', data);
+        await savePaperToHistory(editableMetadata || { title: (file as any)?.name || 'Research Paper' }, 'uploaded', data);
       } catch (saveErr) {
         console.warn('Non-blocking savePaperToHistory error:', saveErr);
       }
@@ -799,8 +1116,8 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
       let msg = err?.message || 'Failed to upload to Zenodo';
       if (msg.toLowerCase().includes('load failed') || msg.toLowerCase().includes('failed to fetch')) {
         msg = 'Connection to upload service timed out or was interrupted. Please try again.';
-      } else if (msg.includes('expected pattern') || msg.includes('did not match')) {
-        msg = 'Zenodo metadata validation notice: A field value was formatted to match standard Zenodo deposit format.';
+      } else if (msg.toLowerCase().includes('expected pattern') || msg.toLowerCase().includes('did not match')) {
+        msg = 'Zenodo token or deposit pattern notice: Please verify that your Zenodo Personal Access Token has deposit:write permissions.';
       }
       setError(msg);
     } finally {
@@ -845,6 +1162,37 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
       </div>
       
       <div className="flex flex-col gap-6">
+        {/* Active Document / Loaded Metadata Banner */}
+        {(file || editableMetadata) && (
+          <div className="p-4 bg-blue-50/90 border border-blue-200 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+            <div className="flex items-start sm:items-center gap-2.5 min-w-0">
+              <div className="p-2 bg-blue-600 text-white rounded-lg shrink-0 flex items-center justify-center">
+                <FileText className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <p className="font-bold text-blue-950 truncate max-w-md sm:max-w-xs md:max-w-md">
+                  {file?.name || editableMetadata?.title || 'Loaded Research Document'}
+                </p>
+                <p className="text-[11px] text-blue-700">
+                  {file ? `${(file.size / (1024 * 1024)).toFixed(2)} MB • Ready for processing` : 'Metadata draft loaded in active uploader'}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 self-end sm:self-center">
+              <button
+                type="button"
+                onClick={handleStartOver}
+                className="px-3 py-1.5 bg-white hover:bg-rose-50 border border-rose-200 hover:border-rose-300 text-rose-700 font-semibold rounded-lg transition-all flex items-center gap-1 shrink-0 text-xs shadow-2xs cursor-pointer"
+                title="Clear current document and start over"
+              >
+                <X className="w-3.5 h-3.5" />
+                <span>Clear / Start Over</span>
+              </button>
+            </div>
+          </div>
+        )}
+
         <label
           htmlFor="pdf-file-picker"
           onDragOver={handleDragOver}
@@ -861,11 +1209,27 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
             {file ? file.name : 'Click anywhere or drag and drop your research PDF'}
           </span>
           <span className="text-xs text-slate-500 mt-1">
-            {file ? `${(file.size / (1024 * 1024)).toFixed(2)} MB • Selected & Ready` : 'Supported format: .pdf (up to 100MB)'}
+            {file ? `${(file.size / (1024 * 1024)).toFixed(2)} MB • Selected` : 'Supported format: .pdf (up to 100MB)'}
           </span>
-          <div className="mt-4 px-4 py-1.5 bg-white border border-slate-300 text-slate-700 text-xs font-semibold rounded-lg shadow-sm hover:bg-slate-50 transition-all flex items-center gap-1.5 pointer-events-none">
-            <FolderOpen className="w-3.5 h-3.5 text-blue-600" />
-            {file ? 'Choose Different File' : 'Browse Computer'}
+          <div className="mt-4 flex items-center gap-2">
+            <div className="px-4 py-1.5 bg-white border border-slate-300 text-slate-700 text-xs font-semibold rounded-lg shadow-sm hover:bg-slate-50 transition-all flex items-center gap-1.5 pointer-events-none">
+              <FolderOpen className="w-3.5 h-3.5 text-blue-600" />
+              {file ? 'Choose Different File' : 'Browse Computer'}
+            </div>
+            {file && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  handleStartOver();
+                }}
+                className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 text-xs font-semibold rounded-lg transition-all flex items-center gap-1 cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+                Clear File
+              </button>
+            )}
           </div>
         </label>
 
@@ -946,15 +1310,24 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
           <div className="flex flex-col sm:flex-row items-center justify-between gap-3 p-4 bg-blue-50/70 border border-blue-200 rounded-xl">
             <div className="flex items-center gap-2 text-blue-900 text-sm font-semibold">
               <CheckCircle2 className="w-5 h-5 text-blue-600 shrink-0" />
-              <span>Step 1 Complete: PDF Processed</span>
+              <span>Step 1 Complete: Document Processed</span>
             </div>
             <div className="flex items-center gap-2 w-full sm:w-auto">
+              <button
+                type="button"
+                onClick={handleStartOver}
+                className="px-3 py-2 text-xs font-semibold text-rose-700 hover:text-rose-900 border border-rose-200 hover:border-rose-300 bg-white rounded-lg transition-all flex items-center gap-1 cursor-pointer"
+                title="Clear Document"
+              >
+                <X className="w-3.5 h-3.5" />
+                Clear Document
+              </button>
               <button
                 onClick={handleProcess}
                 disabled={uploading}
                 className="px-3 py-2 text-xs font-semibold text-slate-600 hover:text-slate-900 border border-slate-300 rounded-lg hover:bg-white transition-all cursor-pointer"
               >
-                Re-process PDF
+                Re-process
               </button>
               <button
                 onClick={handleUploadToZenodo}
@@ -978,18 +1351,27 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
             className="mt-6 space-y-6"
           >
             {error && (
-              <div className="p-4 bg-red-50 rounded-xl border border-red-200 flex items-center justify-between gap-3 text-red-700">
+              <div className="p-4 bg-red-50 rounded-xl border border-red-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-red-700">
                 <div className="flex items-center gap-3">
                   <AlertCircle className="w-5 h-5 shrink-0" />
                   <span className="text-sm font-medium">{error}</span>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setError(null)}
-                  className="text-xs font-bold text-red-600 hover:text-red-800 underline shrink-0 cursor-pointer"
-                >
-                  Dismiss
-                </button>
+                <div className="flex items-center gap-2 self-end sm:self-center">
+                  <button
+                    type="button"
+                    onClick={handleStartOver}
+                    className="px-2.5 py-1 text-xs font-bold text-red-700 bg-red-100 hover:bg-red-200 rounded-lg shrink-0 cursor-pointer"
+                  >
+                    Clear Document
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setError(null)}
+                    className="text-xs font-bold text-red-600 hover:text-red-800 underline shrink-0 cursor-pointer"
+                  >
+                    Dismiss
+                  </button>
+                </div>
               </div>
             )}
 
@@ -1027,14 +1409,25 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
                     </h3>
                     <p className="text-xs text-slate-500 mt-0.5">Please review all extracted metadata before submitting to Zenodo</p>
                   </div>
-                  <button
-                    onClick={handleUploadToZenodo}
-                    disabled={uploading}
-                    className="px-6 py-2.5 bg-indigo-600 text-white rounded-xl font-bold text-sm hover:bg-indigo-700 transition-all flex items-center justify-center gap-2 disabled:bg-slate-300 shadow-sm cursor-pointer disabled:cursor-not-allowed"
-                  >
-                    {uploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <CloudUpload className="w-4 h-4" />}
-                    {uploading ? 'Uploading to Zenodo...' : 'Final Upload to Zenodo'}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleStartOver}
+                      className="px-3.5 py-2 text-xs font-semibold text-rose-700 hover:text-rose-800 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl transition-all flex items-center gap-1 cursor-pointer"
+                      title="Discard current draft"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                      <span>Discard Draft</span>
+                    </button>
+                    <button
+                      onClick={handleUploadToZenodo}
+                      disabled={uploading}
+                      className="px-6 py-2.5 bg-indigo-600 text-white rounded-xl font-bold text-sm hover:bg-indigo-700 transition-all flex items-center justify-center gap-2 disabled:bg-slate-300 shadow-sm cursor-pointer disabled:cursor-not-allowed"
+                    >
+                      {uploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <CloudUpload className="w-4 h-4" />}
+                      {uploading ? 'Uploading to Zenodo...' : 'Final Upload to Zenodo'}
+                    </button>
+                  </div>
                 </div>
 
                 {/* AI Review Warning Box */}
@@ -1103,6 +1496,15 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
 
                   {/* Authors Section with WHOIS Bio */}
                   <div className="pt-6 border-t border-slate-200">
+                    {savedAuthorProfile && (
+                      <div className="mb-4 px-3.5 py-2.5 bg-indigo-50 border border-indigo-200 rounded-xl flex items-center justify-between text-xs text-indigo-950">
+                        <span className="flex items-center gap-2 font-medium">
+                          <CloudUpload className="w-4 h-4 text-indigo-600 shrink-0" /> Permanent Google Cloud Profile active for <strong>{savedAuthorProfile.name}</strong> ({savedAuthorProfile.affiliation || 'No affiliation'})
+                        </span>
+                        <span className="text-[11px] bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded font-semibold">Synced across sessions</span>
+                      </div>
+                    )}
+
                     <div className="flex items-center justify-between mb-4">
                       <div>
                         <h4 className="text-sm font-bold text-slate-900 flex items-center gap-2">
@@ -1110,19 +1512,43 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
                         </h4>
                         <p className="text-xs text-slate-500 mt-0.5">Author metadata enriched with live Google Search WHOIS biographies.</p>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const current = editableMetadata.authors || [];
-                          setEditableMetadata({
-                            ...editableMetadata,
-                            authors: [...current, { name: '', affiliation: '', url: '', whoisBio: '' }]
-                          });
-                        }}
-                        className="px-3 py-1.5 text-xs font-semibold text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors flex items-center gap-1"
-                      >
-                        <Plus className="w-3.5 h-3.5" /> Add Author
-                      </button>
+                      <div className="flex items-center gap-2">
+                        {googleUserName && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const current = editableMetadata.authors || [];
+                              if (current.length > 0) {
+                                const updated = [...current];
+                                updated[0] = { ...updated[0], name: googleUserName };
+                                setEditableMetadata({ ...editableMetadata, authors: updated });
+                              } else {
+                                setEditableMetadata({
+                                  ...editableMetadata,
+                                  authors: [{ name: googleUserName, affiliation: '', url: '', whoisBio: '' }]
+                                });
+                              }
+                            }}
+                            className="px-3 py-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-lg transition-colors flex items-center gap-1"
+                            title={`Set author name to your Google login name (${googleUserName})`}
+                          >
+                            <Sparkles className="w-3.5 h-3.5 text-emerald-600" /> Use Google Name ({googleUserName})
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const current = editableMetadata.authors || [];
+                            setEditableMetadata({
+                              ...editableMetadata,
+                              authors: [...current, { name: '', affiliation: '', url: '', whoisBio: '' }]
+                            });
+                          }}
+                          className="px-3 py-1.5 text-xs font-semibold text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors flex items-center gap-1"
+                        >
+                          <Plus className="w-3.5 h-3.5" /> Add Author
+                        </button>
+                      </div>
                     </div>
 
                     <div className="space-y-4">
@@ -1133,6 +1559,23 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
                               Author #{idx + 1}
                             </span>
                             <div className="flex items-center gap-2">
+                              {idx === 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => persistPermanentAuthorProfile(author)}
+                                  disabled={savingAuthorProfile || !author.name}
+                                  className="px-2.5 py-1 text-[11px] font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 rounded-lg transition-colors flex items-center gap-1 disabled:opacity-50"
+                                  title="Permanently store author name, affiliation, and URL with Google Cloud Storage across sessions"
+                                >
+                                  {savingAuthorProfile ? (
+                                    <><Loader2 className="w-3 h-3 animate-spin" /> Saving...</>
+                                  ) : authorProfileSavedMsg ? (
+                                    <><CheckCircle2 className="w-3 h-3 text-emerald-600" /> Saved Permanently!</>
+                                  ) : (
+                                    <><CloudUpload className="w-3 h-3 text-indigo-600" /> Save Profile Permanently</>
+                                  )}
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 onClick={() => handleFetchAuthorWhois(idx)}
