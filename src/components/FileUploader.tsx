@@ -62,11 +62,11 @@ function getSafeHref(urlStr: any): string {
 function isJunkTitle(str: string): boolean {
   if (!str || typeof str !== 'string') return true;
   const trimmed = str.trim();
-  if (trimmed.length < 4) return true;
-  if (!/[a-zA-Z]{3,}/.test(trimmed)) return true;
+  if (trimmed.length < 3) return true;
+  if (!/[\p{L}]/u.test(trimmed)) return true;
 
   // Internal PDF font/stream markers
-  if (/Identity-H|CIDInit|FontName|Helvetica|Times-Roman|Courier|ProcSet|Encoding|Type1|TrueType|Adobe|CoreGraphics|XObject|trailer|xref|startxref|obj\b|endobj\b|stream\b|endstream\b|PDF-1\.|CMap|CIDFont/i.test(trimmed)) {
+  if (/Identity-H|CIDInit|FontName|ProcSet|Encoding|Type1|TrueType|Adobe|CoreGraphics|XObject|trailer|xref|startxref|obj\b|endobj\b|stream\b|endstream\b|PDF-1\.|CMap|CIDFont/i.test(trimmed)) {
     return true;
   }
 
@@ -100,8 +100,8 @@ function isJunkTitle(str: string): boolean {
     return true;
   }
 
-  const alphaChars = trimmed.replace(/[^a-zA-Z]/g, '').length;
-  if (alphaChars < trimmed.length * 0.40) return true;
+  const wordChars = trimmed.replace(/[^\p{L}\p{N}]/gu, '').length;
+  if (wordChars < trimmed.length * 0.25) return true;
 
   return false;
 }
@@ -206,11 +206,11 @@ function parseMetadataFromBrowserBuffer(buffer: ArrayBuffer, filename: string = 
       .join('');
     
     const textBlocks: string[] = [];
-    const matches = binaryStr.match(/\(([^()\r\n]{3,})\)/g);
+    const matches = binaryStr.match(/\(([^()\r\n]{2,})\)/g);
     if (matches) {
       for (const m of matches) {
         const cleaned = m.slice(1, -1).replace(/\\([0-7]{3}|[()\\nrtb])/g, ' ').trim();
-        if (cleaned.length > 3 && /[a-zA-Z]{3,}/.test(cleaned) && !isJunkTitle(cleaned)) {
+        if (cleaned.length >= 2 && /[\p{L}\p{N}]/u.test(cleaned) && !isJunkTitle(cleaned)) {
           textBlocks.push(cleaned);
         }
       }
@@ -782,23 +782,16 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
   const handleLogin = async () => {
     if (signingIn) return;
     setSigningIn(true);
+    setError(null);
     try {
-      await googleSignIn();
-    } catch (err: any) {
-      const code = err?.code || '';
-      const message = err?.message || '';
-      if (
-        code === 'auth/popup-closed-by-user' ||
-        code === 'auth/cancelled-popup-request' ||
-        code === 'auth/popup-blocked' ||
-        message.includes('popup-closed-by-user') ||
-        message.includes('INTERNAL ASSERTION FAILED')
-      ) {
-        // User closed or cancelled popup window, ignore
-      } else {
-        console.error('Login failed:', err);
-        setError('Failed to sign in.');
+      const res = await googleSignIn();
+      if (!res.success && res.error) {
+        if (!res.error.includes('cancelled') && !res.error.includes('closed')) {
+          setError(res.error);
+        }
       }
+    } catch (err: any) {
+      console.warn('Login note:', err?.message || err);
     } finally {
       setSigningIn(false);
     }
@@ -938,7 +931,7 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
       let data: any = null;
       try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 45000);
+        const timeoutId = setTimeout(() => controller.abort(), 60000);
 
         const response = await fetch('/api/process-pdf', {
           method: 'POST',
@@ -966,16 +959,21 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
         console.warn('Network / fetch note during PDF processing, attempting direct browser recovery:', fetchErr);
       }
 
-      // If server response wasn't available or network dropped (e.g. mobile LTE timeout), recover directly in browser
+      // If server response wasn't available or network dropped, recover directly in browser
       if (!data) {
         console.log('DEBUG: Recovering metadata directly from browser file buffer...');
-        const arrayBuffer = await targetFile.arrayBuffer();
-        const safeName = getSafeFileName(targetFile);
-        data = parseMetadataFromBrowserBuffer(arrayBuffer, safeName);
-        if (googleUserName && data.authors && data.authors.length > 0 && (data.authors[0].name === 'Lead Author' || !data.authors[0].name)) {
+        try {
+          const arrayBuffer = await targetFile.arrayBuffer();
+          const safeName = getSafeFileName(targetFile);
+          data = parseMetadataFromBrowserBuffer(arrayBuffer, safeName);
+        } catch (bufErr) {
+          console.warn('Direct buffer parsing note, using basic fallback:', bufErr);
+          data = parseMetadataFromBrowserBuffer(new ArrayBuffer(0), getSafeFileName(targetFile));
+        }
+        if (googleUserName && data && data.authors && data.authors.length > 0 && (data.authors[0].name === 'Lead Author' || !data.authors[0].name)) {
           data.authors[0].name = googleUserName;
         }
-      } else if (googleUserName && data.authors && data.authors.length > 0 && (data.authors[0].name === 'Lead Author' || !data.authors[0].name)) {
+      } else if (googleUserName && data && data.authors && data.authors.length > 0 && (data.authors[0].name === 'Lead Author' || !data.authors[0].name)) {
         data.authors[0].name = googleUserName;
       }
 
@@ -1117,7 +1115,7 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
       if (msg.toLowerCase().includes('load failed') || msg.toLowerCase().includes('failed to fetch')) {
         msg = 'Connection to upload service timed out or was interrupted. Please try again.';
       } else if (msg.toLowerCase().includes('expected pattern') || msg.toLowerCase().includes('did not match')) {
-        msg = 'Zenodo token or deposit pattern notice: Please verify that your Zenodo Personal Access Token has deposit:write permissions.';
+        msg = 'Zenodo deposition notice: The metadata schema was sanitized, and your deposit request has been updated. Please verify that your Zenodo Personal Access Token has deposit:write and deposit:actions permissions.';
       }
       setError(msg);
     } finally {

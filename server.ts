@@ -11,19 +11,38 @@ const rootDir = process.cwd();
 
 function fallbackExtractPdfText(buffer: Buffer): string {
   try {
-    const str = buffer.toString('binary');
     const textBlocks: string[] = [];
-    const matches = str.match(/\(([^()\r\n]{3,})\)/g);
-    if (matches) {
-      for (const m of matches) {
+    const latinStr = buffer.toString('latin1');
+    
+    // Match literal PDF strings: (Text...)
+    const literalMatches = latinStr.match(/\(([^()\r\n]{2,})\)/g);
+    if (literalMatches) {
+      for (const m of literalMatches) {
         const cleaned = m.slice(1, -1).replace(/\\([0-7]{3}|[()\\nrtb])/g, ' ').trim();
-        if (cleaned.length > 3 && /[a-zA-Z]{3,}/.test(cleaned)) {
+        if (cleaned.length >= 2 && /[\p{L}\p{N}]/u.test(cleaned) && !/^(Identity-H|ProcSet|Encoding|FontName|Helvetica|Times-Roman)/i.test(cleaned)) {
           textBlocks.push(cleaned);
         }
       }
     }
+
+    // Match hex string streams if present: <48656c6c6f>
+    const hexMatches = latinStr.match(/<([0-9a-fA-F]{6,})>/g);
+    if (hexMatches && hexMatches.length > 0 && hexMatches.length < 400) {
+      for (const h of hexMatches) {
+        const hex = h.slice(1, -1);
+        if (hex.length % 2 === 0) {
+          try {
+            const decoded = Buffer.from(hex, 'hex').toString('utf8');
+            if (decoded.length >= 2 && /[\p{L}]/u.test(decoded)) {
+              textBlocks.push(decoded);
+            }
+          } catch {}
+        }
+      }
+    }
+
     const extracted = textBlocks.join(' ').replace(/\s+/g, ' ').trim();
-    return extracted.length > 50 ? extracted.substring(0, 30000) : '';
+    return extracted.length > 30 ? extracted.substring(0, 40000) : '';
   } catch (e) {
     return '';
   }
@@ -451,26 +470,26 @@ function formatZenodoDate(dateStr?: any): string {
     const y = parseInt(ymdMatch[1], 10);
     const m = Math.min(Math.max(parseInt(ymdMatch[2], 10), 1), 12);
     const d = Math.min(Math.max(parseInt(ymdMatch[3], 10), 1), 31);
-    if (y >= 1000 && y <= 9999) {
+    if (y >= 1900 && y <= 2100) {
       return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
     }
   }
 
-  // 2. Strict YYYY-MM -> Convert to YYYY-MM-01
+  // 2. Strict YYYY-MM
   const ymMatch = trimmed.match(/^(\d{4})[/-](\d{1,2})$/);
   if (ymMatch) {
     const y = parseInt(ymMatch[1], 10);
     const m = Math.min(Math.max(parseInt(ymMatch[2], 10), 1), 12);
-    if (y >= 1000 && y <= 9999) {
+    if (y >= 1900 && y <= 2100) {
       return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-01`;
     }
   }
 
-  // 3. Strict YYYY -> Convert to YYYY-01-01
+  // 3. Strict YYYY
   const yMatch = trimmed.match(/^(\d{4})$/);
   if (yMatch) {
     const y = parseInt(yMatch[1], 10);
-    if (y >= 1000 && y <= 9999) {
+    if (y >= 1900 && y <= 2100) {
       return `${String(y).padStart(4, '0')}-01-01`;
     }
   }
@@ -481,12 +500,27 @@ function formatZenodoDate(dateStr?: any): string {
     const y = parseInt(isoMatch[1], 10);
     const m = Math.min(Math.max(parseInt(isoMatch[2], 10), 1), 12);
     const d = Math.min(Math.max(parseInt(isoMatch[3], 10), 1), 31);
-    if (y >= 1000 && y <= 9999) {
+    if (y >= 1900 && y <= 2100) {
       return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
     }
   }
 
-  // 5. Year fallback in text
+  // 5. Day/Month/Year or Month/Day/Year formats (e.g. 15/08/2024 or 08/15/2024)
+  const dmyMatch = trimmed.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})/);
+  if (dmyMatch) {
+    const y = parseInt(dmyMatch[3], 10);
+    let p1 = parseInt(dmyMatch[1], 10);
+    let p2 = parseInt(dmyMatch[2], 10);
+    let m = p1 > 12 ? p2 : p1;
+    let d = p1 > 12 ? p1 : p2;
+    m = Math.min(Math.max(m, 1), 12);
+    d = Math.min(Math.max(d, 1), 31);
+    if (y >= 1900 && y <= 2100) {
+      return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    }
+  }
+
+  // 6. Year fallback anywhere in text (e.g. "Published August 2024")
   const yearMatch = trimmed.match(/\b(19|20)\d{2}\b/);
   if (yearMatch) {
     return `${yearMatch[0]}-01-01`;
@@ -494,8 +528,23 @@ function formatZenodoDate(dateStr?: any): string {
   return today;
 }
 
+function isValidZenodoUrl(str: string): boolean {
+  if (!str || typeof str !== 'string') return false;
+  const trimmed = str.trim();
+  if (trimmed.length < 8 || trimmed.length > 2000) return false;
+  if (!/^https?:\/\/[a-zA-Z0-9][-a-zA-Z0-9.]*\.[a-zA-Z]{2,}(:\d+)?(\/[^\s]*)?$/i.test(trimmed)) return false;
+  try {
+    const u = new URL(trimmed);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    if (!u.hostname || !u.hostname.includes('.') || u.hostname.length < 4) return false;
+    if (/^(na|none|null|undefined|n\/a|example\.com|test\.com)$/i.test(u.hostname)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function sanitizeRelatedIdentifiers(rawIdentifiers: any[], codeAndDataLinks?: any): any[] {
-  const validSchemes = new Set(['doi', 'isbn', 'issn', 'url', 'urn', 'handle', 'arxiv', 'pmid', 'orcid', 'gnd', 'ads', 'citeproc', 'purl', 'swh']);
   const validRelations = new Set([
     'isCitedBy', 'cites', 'isSupplementTo', 'isSupplementedBy', 'isContinuedBy',
     'continues', 'isDescribedBy', 'describes', 'hasMetadata', 'isMetadataFor',
@@ -507,22 +556,27 @@ function sanitizeRelatedIdentifiers(rawIdentifiers: any[], codeAndDataLinks?: an
   const results: any[] = [];
   const seen = new Set<string>();
 
-  const list = Array.isArray(rawIdentifiers) ? [...rawIdentifiers] : [];
+  const list: any[] = [];
+  if (Array.isArray(rawIdentifiers)) {
+    list.push(...rawIdentifiers);
+  }
+
+  // Extract from code/data links
   if (codeAndDataLinks) {
-    if (typeof codeAndDataLinks === 'string' && codeAndDataLinks.trim()) {
-      list.push({ identifier: codeAndDataLinks.trim(), scheme: 'url', relation: 'isSupplementTo' });
+    if (typeof codeAndDataLinks === 'string') {
+      codeAndDataLinks.split(/[,\n;]+/).forEach(link => {
+        const trimmed = link.trim();
+        if (trimmed && isValidZenodoUrl(trimmed)) {
+          list.push({ identifier: trimmed, scheme: 'url', relation: 'isSupplementTo' });
+        }
+      });
     } else if (Array.isArray(codeAndDataLinks)) {
       codeAndDataLinks.forEach(link => {
-        const linkStr = safeString(link);
-        if (linkStr) {
+        const linkStr = safeString(link).trim();
+        if (linkStr && isValidZenodoUrl(linkStr)) {
           list.push({ identifier: linkStr, scheme: 'url', relation: 'isSupplementTo' });
         }
       });
-    } else if (typeof codeAndDataLinks === 'object') {
-      const linkStr = safeString(codeAndDataLinks);
-      if (linkStr) {
-        list.push({ identifier: linkStr, scheme: 'url', relation: 'isSupplementTo' });
-      }
     }
   }
 
@@ -531,79 +585,109 @@ function sanitizeRelatedIdentifiers(rawIdentifiers: any[], codeAndDataLinks?: an
     let idStr = typeof item === 'string' ? item.trim() : (item.identifier || '').trim();
     if (!idStr) continue;
 
+    // Ignore placeholder / junk strings
+    if (/^(na|n\/a|none|null|undefined|empty|doi|url|arxiv|issn|isbn)$/i.test(idStr)) continue;
+
     let scheme = typeof item === 'object' && item.scheme ? String(item.scheme).toLowerCase().trim() : '';
     let relation = typeof item === 'object' && item.relation ? String(item.relation).trim() : 'isSupplementTo';
     if (!validRelations.has(relation)) {
       relation = 'isSupplementTo';
     }
 
-    // Process DOI
+    // 1. Process DOI
     if (idStr.startsWith('10.') || /^doi:/i.test(idStr) || /^https?:\/\/(dx\.)?doi\.org\//i.test(idStr) || scheme === 'doi') {
       const strippedDoi = idStr.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '').replace(/^doi:\s*/i, '').trim();
       if (/^10\.\d{4,9}\/[-._;()/:A-Za-z0-9]+$/.test(strippedDoi)) {
         scheme = 'doi';
         idStr = strippedDoi;
-      } else if (idStr.startsWith('http://') || idStr.startsWith('https://')) {
+      } else if (isValidZenodoUrl(idStr)) {
         scheme = 'url';
       } else {
         continue;
       }
     }
 
-    // Process arXiv
-    if (scheme === 'arxiv' || /^arxiv:/i.test(idStr) || /^https?:\/\/arxiv\.org\//i.test(idStr)) {
-      if (idStr.startsWith('http://') || idStr.startsWith('https://')) {
+    // 2. Process arXiv
+    else if (scheme === 'arxiv' || /^arxiv:/i.test(idStr) || /^https?:\/\/arxiv\.org\//i.test(idStr)) {
+      if (isValidZenodoUrl(idStr)) {
         scheme = 'url';
       } else {
         const strippedArxiv = idStr.replace(/^arxiv:\s*/i, '').trim();
         if (/^\d{4}\.\d{4,5}(v\d+)?$/.test(strippedArxiv)) {
           scheme = 'arxiv';
           idStr = strippedArxiv;
+        } else if (/^[a-zA-Z\-]+(\.[a-zA-Z\-]+)?\/\d{7}$/.test(strippedArxiv)) {
+          scheme = 'arxiv';
+          idStr = strippedArxiv;
         } else {
-          scheme = 'url';
-          idStr = `https://arxiv.org/abs/${strippedArxiv}`;
+          continue;
         }
       }
     }
 
-    // Process URLs
-    if (scheme === 'url' || (!scheme && idStr.startsWith('http')) || (!scheme && idStr.includes('.'))) {
+    // 3. Process URLs
+    else if (scheme === 'url' || idStr.startsWith('http://') || idStr.startsWith('https://')) {
       if (!idStr.startsWith('http://') && !idStr.startsWith('https://')) {
         idStr = `https://${idStr}`;
       }
-      scheme = 'url';
-      if (!/^https?:\/\/[^\s]+$/.test(idStr)) {
-        continue;
-      }
-    }
-
-    if (!validSchemes.has(scheme)) {
-      if (/^https?:\/\//i.test(idStr)) {
+      if (isValidZenodoUrl(idStr)) {
         scheme = 'url';
       } else {
         continue;
       }
     }
 
-    // Strict Pattern validations per scheme for Zenodo Invenio DataCite schema
-    if (scheme === 'doi' && !/^10\.\d{4,9}\/[-._;()/:A-Za-z0-9]+$/.test(idStr)) {
-      continue;
+    // 4. Process ISSN
+    else if (scheme === 'issn' || /^\d{4}-\d{3}[\dX]$/.test(idStr)) {
+      if (/^\d{4}-\d{3}[\dX]$/.test(idStr)) {
+        scheme = 'issn';
+      } else {
+        continue;
+      }
     }
-    if (scheme === 'url' && !/^https?:\/\/[^\s]+$/.test(idStr)) {
-      continue;
+
+    // 5. Process ISBN
+    else if (scheme === 'isbn') {
+      const cleanIsbn = idStr.replace(/[^0-9X]/gi, '').toUpperCase();
+      if (cleanIsbn.length === 10 || cleanIsbn.length === 13) {
+        scheme = 'isbn';
+        idStr = cleanIsbn;
+      } else {
+        continue;
+      }
     }
-    if (scheme === 'issn' && !/^\d{4}-\d{3}[\dX]$/.test(idStr)) {
-      continue;
+
+    // 6. Process ORCID
+    else if (scheme === 'orcid' || /^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/.test(idStr)) {
+      if (/^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/.test(idStr)) {
+        scheme = 'orcid';
+      } else {
+        continue;
+      }
     }
-    if (scheme === 'isbn' && !/^[\d\-X]{10,17}$/.test(idStr)) {
-      continue;
+
+    // 7. Process PMID
+    else if (scheme === 'pmid' || (/^\d{1,10}$/.test(idStr) && scheme === 'pmid')) {
+      if (/^\d{1,10}$/.test(idStr)) {
+        scheme = 'pmid';
+      } else {
+        continue;
+      }
+    } else {
+      // If it's a valid URL, treat as URL
+      if (isValidZenodoUrl(idStr)) {
+        scheme = 'url';
+      } else {
+        continue;
+      }
     }
-    if (scheme === 'orcid' && !/^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/.test(idStr)) {
-      continue;
-    }
-    if (scheme === 'pmid' && !/^\d+$/.test(idStr)) {
-      continue;
-    }
+
+    // Strict validation check
+    if (scheme === 'doi' && !/^10\.\d{4,9}\/[-._;()/:A-Za-z0-9]+$/.test(idStr)) continue;
+    if (scheme === 'url' && !isValidZenodoUrl(idStr)) continue;
+    if (scheme === 'issn' && !/^\d{4}-\d{3}[\dX]$/.test(idStr)) continue;
+    if (scheme === 'orcid' && !/^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/.test(idStr)) continue;
+    if (scheme === 'pmid' && !/^\d+$/.test(idStr)) continue;
 
     const key = `${scheme}:${idStr}`;
     if (seen.has(key)) continue;
@@ -848,12 +932,10 @@ function extractGeminiApiKey(req: express.Request): string {
 }
 
 const GEMINI_MODELS = [
-  'gemini-3.7-flash',
   'gemini-2.5-flash',
-  'gemini-2.0-flash',
   'gemini-flash-latest',
-  'gemini-3.1-flash-lite',
-  'gemini-1.5-flash'
+  'gemini-3.7-flash',
+  'gemini-3.1-flash-lite'
 ];
 
 function createGeminiClient(apiKey: string): GoogleGenAI {
@@ -870,19 +952,18 @@ function createGeminiClient(apiKey: string): GoogleGenAI {
 async function generateContentWithFallback(ai: GoogleGenAI, request: { contents: any, config?: any }): Promise<any> {
   let lastErr: any = null;
   let sawInvalidKey = false;
-  const maxPoolPasses = 5;
+  const maxPoolPasses = 3;
 
   for (let pass = 0; pass < maxPoolPasses; pass++) {
     if (pass > 0) {
-      // Exponential backoff with jitter on retry
-      const backoffMs = Math.min(5000, 800 * Math.pow(1.6, pass) + Math.random() * 500);
+      const backoffMs = 400 + Math.random() * 300;
       await new Promise(resolve => setTimeout(resolve, backoffMs));
     }
 
     for (const modelName of GEMINI_MODELS) {
       try {
         const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error(`Timeout waiting for Gemini model ${modelName}`)), 40000)
+          setTimeout(() => reject(new Error(`Timeout waiting for Gemini model ${modelName}`)), 12000)
         );
         const result = await Promise.race([
           ai.models.generateContent({
@@ -907,26 +988,13 @@ async function generateContentWithFallback(ai: GoogleGenAI, request: { contents:
 
         if (isInvalidKey) {
           sawInvalidKey = true;
-          break; // Don't keep hammering with an invalid key
+          break;
         }
 
-        const isTemporaryCapacity = status === 503 || status === 429 || status === 'UNAVAILABLE' || (msg && (
-          msg.includes('503') ||
-          msg.includes('429') ||
-          msg.includes('UNAVAILABLE') ||
-          msg.includes('RESOURCE_EXHAUSTED') ||
-          msg.includes('high demand') ||
-          msg.includes('high load') ||
-          msg.includes('overloaded') ||
-          msg.includes('capacity')
-        ));
-
-        if (isTemporaryCapacity) {
-          // Add brief jitter before switching to the next fallback model
-          await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 400));
-        }
+        // On 503 / 429 / UNAVAILABLE / high demand, immediately cycle to the next model in GEMINI_MODELS
       }
     }
+    if (sawInvalidKey) break;
   }
 
   if (sawInvalidKey) {
@@ -940,8 +1008,8 @@ function isJunkTitle(str: string): boolean {
   if (!str || typeof str !== 'string') return true;
   if (isGibberish(str)) return true;
   const trimmed = str.trim();
-  if (trimmed.length < 4) return true;
-  if (!/[a-zA-Z]{3,}/.test(trimmed)) return true;
+  if (trimmed.length < 3) return true;
+  if (!/[\p{L}]/u.test(trimmed)) return true;
 
   // TeX / pdfTeX / LaTeX engine metadata strings & binary markers
   if (/pdftex|pdflatex|tex\s*live|hyperref|pdfinfo|dvips|xetex|luatex|pdfpages|graphicx/i.test(trimmed)) {
@@ -949,7 +1017,7 @@ function isJunkTitle(str: string): boolean {
   }
 
   // Internal PDF font/stream markers
-  if (/Identity-H|CIDInit|FontName|Helvetica|Times-Roman|Courier|ProcSet|Encoding|Type1|TrueType|Adobe|CoreGraphics|XObject|trailer|xref|startxref|obj\b|endobj\b|stream\b|endstream\b|PDF-1\.|CMap|CIDFont/i.test(trimmed)) {
+  if (/Identity-H|CIDInit|FontName|ProcSet|Encoding|Type1|TrueType|Adobe|CoreGraphics|XObject|trailer|xref|startxref|obj\b|endobj\b|stream\b|endstream\b|PDF-1\.|CMap|CIDFont/i.test(trimmed)) {
     return true;
   }
 
@@ -983,9 +1051,8 @@ function isJunkTitle(str: string): boolean {
     return true;
   }
 
-  // If > 55% non-alphanumeric
-  const alphaChars = trimmed.replace(/[^a-zA-Z]/g, '').length;
-  if (alphaChars < trimmed.length * 0.40) return true;
+  const wordChars = trimmed.replace(/[^\p{L}\p{N}]/gu, '').length;
+  if (wordChars < trimmed.length * 0.25) return true;
 
   return false;
 }
@@ -1089,43 +1156,28 @@ function sanitizeAuthorName(rawName: string): string {
 
 function isGibberish(text: string): boolean {
   if (!text || typeof text !== 'string') return true;
-  if (text.includes('(cid:') || text.includes('\uFFFD')) return true;
-  if (/pdftex|pdflatex|tex\s*live|hyperref|pdfinfo|dvips|xetex|luatex|pdfpages|graphicx|texlive|pdffonts/i.test(text)) return true;
-  
-  // Check for binary font garbage or high density of non-ASCII symbols
-  const nonAsciiSymbols = text.match(/[^\x20-\x7E]/g);
-  if (nonAsciiSymbols && nonAsciiSymbols.length > 2) return true;
-
-  const clean = text.replace(/[^a-zA-Z0-9\s]/g, '');
-  const alphaRatio = clean.length / Math.max(1, text.length);
-  if (alphaRatio < 0.5 && text.length > 5) return true;
-
-  const words = text.split(/\s+/);
-  const gibberishWords = words.filter(w => /[^a-zA-Z]{2,}/.test(w) && !/^\d+$/.test(w));
-  if (gibberishWords.length >= 2) return true;
-
+  const trimmed = text.trim();
+  if (!trimmed) return true;
+  // True un-decoded font markers or replacement chars
+  if (trimmed.includes('\uFFFD') || /^\(cid:\d+\)+$/.test(trimmed)) return true;
+  // Raw PDF stream or xref commands
+  if (/^(?:\d+\s+\d+\s+obj|endobj|stream|endstream|xref|trailer|startxref|\/Type\s*\/Page|\/Filter\s*\/FlateDecode)$/i.test(trimmed)) {
+    return true;
+  }
+  // If string has virtually no word characters at all and is long
+  if (trimmed.length > 10 && !/[\p{L}\p{N}]/u.test(trimmed)) {
+    return true;
+  }
   return false;
 }
 
 function cleanExtractedPdfText(text: string): string {
   if (!text || typeof text !== 'string') return '';
-  const lines = text.split('\n');
-  const cleanLines: string[] = [];
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    if (isGibberish(trimmed)) continue;
-    if (/pdftex|pdflatex|tex\s*live|hyperref|pdfinfo|dvips|xetex|luatex|pdfpages|graphicx|texlive|pdffonts|producer|creator|creationdate/i.test(trimmed)) continue;
-    if (/^(?:object|endobj|stream|endstream|trailer|xref|startxref)\b/i.test(trimmed)) continue;
-    if (/[^\x20-\x7E]{2,}/.test(trimmed)) continue;
-    cleanLines.push(trimmed);
-  }
-  const joined = cleanLines.join('\n');
-  const nonAsciiCount = (joined.match(/[^\x20-\x7E]/g) || []).length;
-  if (nonAsciiCount > 10 || /pdftex|tex\s*live/i.test(joined)) {
-    return ''; // Discard heavily polluted extracted text
-  }
-  return joined;
+  // Normalize null bytes and strange control chars while preserving newlines and unicode
+  let clean = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, ' ');
+  // Collapse excessive carriage returns
+  clean = clean.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  return clean.trim();
 }
 
 function sanitizeMetadataResult(metadata: any, filename: string): any {
@@ -1135,61 +1187,63 @@ function sanitizeMetadataResult(metadata: any, filename: string): any {
     metadata = {};
   }
 
-  const isPolluted = (str: string) => {
-    if (!str || typeof str !== 'string') return true;
-    if (isGibberish(str)) return true;
-    if (/pdftex|pdflatex|tex\s*live|texlive|pdfinfo|pdffonts|debian|hyperref|dvips|xetex|luatex|pdfpages|graphicx/i.test(str)) return true;
-    if (str.includes('pdfTeX') || str.includes('TeX Live') || str.includes('Debian')) return true;
-    return false;
-  };
-
   // Title sanitization
-  let rawTitle = typeof metadata.title === 'string' ? metadata.title : '';
-  if (isPolluted(rawTitle)) {
+  let rawTitle = typeof metadata.title === 'string' ? metadata.title.trim() : '';
+  if (!rawTitle || isGibberish(rawTitle)) {
     metadata.title = fallbackTitle;
   } else {
     const cleaned = cleanExtractedTitle(rawTitle, filename);
-    metadata.title = cleaned && !isPolluted(cleaned) ? cleaned : fallbackTitle;
+    metadata.title = cleaned || fallbackTitle;
   }
 
   // Alternative title
-  if (typeof metadata.alternativeTitle === 'string' && isPolluted(metadata.alternativeTitle)) {
+  if (typeof metadata.alternativeTitle === 'string') {
+    metadata.alternativeTitle = metadata.alternativeTitle.trim();
+  } else {
     metadata.alternativeTitle = '';
   }
 
   // Abstract sanitization
-  let rawAbstract = typeof metadata.abstract === 'string' ? metadata.abstract : '';
-  if (isPolluted(rawAbstract) || rawAbstract.length < 15) {
+  let rawAbstract = typeof metadata.abstract === 'string' ? metadata.abstract.trim() : '';
+  if (!rawAbstract || rawAbstract.length < 15) {
     metadata.abstract = `${metadata.title}. Open-access research paper archived for long-term discovery and citation on Zenodo.`;
+  } else {
+    metadata.abstract = rawAbstract;
   }
 
   // Summary sanitization
-  let rawSummary = typeof metadata.summary === 'string' ? metadata.summary : '';
-  if (isPolluted(rawSummary) || rawSummary.length < 15) {
-    metadata.summary = `${metadata.title}. Comprehensive research publication detailing methodology, evaluation, and empirical results.`;
+  let rawSummary = typeof metadata.summary === 'string' ? metadata.summary.trim() : '';
+  if (!rawSummary || rawSummary.length < 15) {
+    metadata.summary = metadata.abstract || `${metadata.title}. Comprehensive research publication detailing methodology, evaluation, and empirical results.`;
+  } else {
+    metadata.summary = rawSummary;
   }
 
   // TLDR sanitization
-  let rawTldr = typeof metadata.tldr === 'string' ? metadata.tldr : '';
-  if (isPolluted(rawTldr) || rawTldr.length < 10) {
-    metadata.tldr = `${metadata.title} - Open-access research paper published on Zenodo.`;
+  let rawTldr = typeof metadata.tldr === 'string' ? metadata.tldr.trim() : '';
+  if (!rawTldr || rawTldr.length < 10) {
+    metadata.tldr = metadata.abstract && metadata.abstract.length < 250 
+      ? metadata.abstract 
+      : `${metadata.title} - Open-access research paper published on Zenodo.`;
+  } else {
+    metadata.tldr = rawTldr;
   }
 
   // Authors sanitization
-  if (Array.isArray(metadata.authors)) {
-    metadata.authors = metadata.authors.map((author: any) => {
+  if (Array.isArray(metadata.authors) && metadata.authors.length > 0) {
+    const cleanedAuthors = metadata.authors.map((author: any) => {
       let name = typeof author === 'string' ? author : (author?.name || '');
       name = sanitizeAuthorName(name);
-      if (!name || isPolluted(name) || /university|department|institute/i.test(name)) {
-        name = '';
-      }
       return {
-        name: name || 'Lead Author',
-        affiliation: typeof author?.affiliation === 'string' && !isPolluted(author.affiliation) ? author.affiliation.trim() : '',
+        name: name || '',
+        affiliation: typeof author?.affiliation === 'string' ? author.affiliation.trim() : '',
         url: typeof author?.url === 'string' ? author.url.trim() : ''
       };
-    }).filter((a: any) => a.name && a.name !== 'Lead Author' || metadata.authors.length === 1);
-    if (metadata.authors.length === 0) {
+    }).filter((a: any) => a.name && a.name !== 'Lead Author' && a.name.length >= 2);
+
+    if (cleanedAuthors.length > 0) {
+      metadata.authors = cleanedAuthors;
+    } else {
       metadata.authors = [{ name: 'Lead Author', affiliation: '', url: '' }];
     }
   } else {
@@ -1197,8 +1251,8 @@ function sanitizeMetadataResult(metadata: any, filename: string): any {
   }
 
   // Key takeaways
-  if (Array.isArray(metadata.keyTakeaways)) {
-    metadata.keyTakeaways = metadata.keyTakeaways.filter((item: string) => item && typeof item === 'string' && !isPolluted(item));
+  if (Array.isArray(metadata.keyTakeaways) && metadata.keyTakeaways.length > 0) {
+    metadata.keyTakeaways = metadata.keyTakeaways.filter((item: any) => typeof item === 'string' && item.trim().length > 0);
   }
   if (!Array.isArray(metadata.keyTakeaways) || metadata.keyTakeaways.length === 0) {
     metadata.keyTakeaways = [
@@ -1208,16 +1262,16 @@ function sanitizeMetadataResult(metadata: any, filename: string): any {
   }
 
   // Novelties
-  if (Array.isArray(metadata.novelties)) {
-    metadata.novelties = metadata.novelties.filter((item: string) => item && typeof item === 'string' && !isPolluted(item));
+  if (Array.isArray(metadata.novelties) && metadata.novelties.length > 0) {
+    metadata.novelties = metadata.novelties.filter((item: any) => typeof item === 'string' && item.trim().length > 0);
   }
   if (!Array.isArray(metadata.novelties) || metadata.novelties.length === 0) {
     metadata.novelties = [`Original methodology and contributions in ${metadata.title}.`];
   }
 
   // Long tail keywords
-  if (Array.isArray(metadata.longTailKeywords)) {
-    metadata.longTailKeywords = metadata.longTailKeywords.filter((item: string) => item && typeof item === 'string' && !isPolluted(item));
+  if (Array.isArray(metadata.longTailKeywords) && metadata.longTailKeywords.length > 0) {
+    metadata.longTailKeywords = metadata.longTailKeywords.filter((item: any) => typeof item === 'string' && item.trim().length > 0);
   }
   if (!Array.isArray(metadata.longTailKeywords) || metadata.longTailKeywords.length === 0) {
     metadata.longTailKeywords = [metadata.title.toLowerCase(), 'open access research', 'zenodo publication'];
@@ -1225,15 +1279,16 @@ function sanitizeMetadataResult(metadata: any, filename: string): any {
 
   // Glossary
   if (Array.isArray(metadata.glossary)) {
-    metadata.glossary = metadata.glossary.filter((g: any) => g && g.term && typeof g.term === 'string' && !isPolluted(g.term) && (!g.definition || !isPolluted(g.definition)));
+    metadata.glossary = metadata.glossary.filter((g: any) => g && g.term && typeof g.term === 'string' && g.term.trim().length > 0);
   } else {
     metadata.glossary = [];
   }
 
   // FAQ
-  if (Array.isArray(metadata.faq)) {
-    metadata.faq = metadata.faq.filter((f: any) => f && f.question && typeof f.question === 'string' && !isPolluted(f.question) && (!f.answer || !isPolluted(f.answer)));
-  } else {
+  if (Array.isArray(metadata.faq) && metadata.faq.length > 0) {
+    metadata.faq = metadata.faq.filter((f: any) => f && f.question && typeof f.question === 'string' && f.question.trim().length > 0);
+  }
+  if (!Array.isArray(metadata.faq) || metadata.faq.length === 0) {
     metadata.faq = [
       {
         question: `What is the primary contribution of ${metadata.title}?`,
@@ -1241,13 +1296,6 @@ function sanitizeMetadataResult(metadata: any, filename: string): any {
       }
     ];
   }
-
-  // Misc string fields
-  ['methodology', 'targetAudience', 'fundingInformation', 'journalName'].forEach(field => {
-    if (metadata[field] && isPolluted(metadata[field])) {
-      metadata[field] = '';
-    }
-  });
 
   return metadata;
 }
@@ -1524,7 +1572,18 @@ If a field is not found, use an empty string or empty array as appropriate.
 Return ONLY valid JSON.`;
 
           const parts: any[] = [{ text: prompt }];
-          if (file.buffer && file.buffer.length > 0 && file.buffer.length < 15 * 1024 * 1024) {
+          if (extractedText && extractedText.length > 50) {
+            let paperContext = extractedText;
+            if (extractedText.length > 40000) {
+              const head = extractedText.substring(0, 30000);
+              const tail = extractedText.substring(extractedText.length - 10000);
+              paperContext = `${head}\n\n[... middle sections omitted for brevity ...]\n\n${tail}`;
+            }
+            parts.push({ text: `Research Paper Document Content:\n\n${paperContext}` });
+            if (file.originalname) {
+              parts.push({ text: `Document Filename: ${file.originalname}` });
+            }
+          } else if (file.buffer && file.buffer.length > 0 && file.buffer.length < 8 * 1024 * 1024) {
             parts.push({
               inlineData: {
                 data: file.buffer.toString('base64'),
@@ -1534,48 +1593,19 @@ Return ONLY valid JSON.`;
             if (file.originalname) {
               parts.push({ text: `Document Filename: ${file.originalname}` });
             }
-          } else if (extractedText) {
-            let paperContext = extractedText;
-            if (extractedText.length > 45000) {
-              const head = extractedText.substring(0, 35000);
-              const tail = extractedText.substring(extractedText.length - 10000);
-              paperContext = `${head}\n\n[... middle sections omitted for speed ...]\n\n${tail}`;
-            }
-            parts.push({ text: `Research Paper Text:\n\n${paperContext}` });
-            if (file.originalname) {
-              parts.push({ text: `Document Filename: ${file.originalname}` });
-            }
           } else {
             parts.push({ text: `Filename: ${file.originalname || 'paper.pdf'}` });
           }
 
-          console.log('DEBUG: Attempting Gemini AI extraction (multimodal PDF)...');
+          console.log('DEBUG: Attempting Gemini AI metadata extraction...');
           try {
             const result = await generateContentWithFallback(ai, {
               contents: [{ role: 'user', parts }],
               config: { responseMimeType: "application/json" }
             });
             metadata = safeExtractJson(result.text, null);
-          } catch (multimodalErr: any) {
-            console.warn('Multimodal PDF extraction note, falling back to text-prompt AI extraction:', multimodalErr?.message || multimodalErr);
-            if (extractedText && extractedText.length > 50) {
-              let paperContext = extractedText;
-              if (extractedText.length > 45000) {
-                const head = extractedText.substring(0, 35000);
-                const tail = extractedText.substring(extractedText.length - 10000);
-                paperContext = `${head}\n\n[... middle sections omitted for speed ...]\n\n${tail}`;
-              }
-              const textParts = [
-                { text: prompt },
-                { text: `Research Paper Text Content:\n\n${paperContext}` },
-                { text: `Document Filename: ${file.originalname || 'paper.pdf'}` }
-              ];
-              const textResult = await generateContentWithFallback(ai, {
-                contents: [{ role: 'user', parts: textParts }],
-                config: { responseMimeType: "application/json" }
-              });
-              metadata = safeExtractJson(textResult.text, null);
-            }
+          } catch (genErr: any) {
+            console.warn('Primary Gemini extraction note:', genErr?.message || genErr);
           }
         } catch (aiErr: any) {
           console.warn('DEBUG: Gemini AI metadata extraction note (using text parser fallback):', aiErr?.message || aiErr);
