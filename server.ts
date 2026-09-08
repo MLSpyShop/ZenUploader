@@ -2137,7 +2137,7 @@ Return a JSON array of strings. Return ONLY valid JSON array.`;
     }
     
     if (!file) {
-      return res.status(400).send('No PDF file provided for upload.');
+      return res.status(400).json({ error: 'No PDF file provided for upload.' });
     }
 
     if (!metadata) {
@@ -2164,7 +2164,7 @@ Return a JSON array of strings. Return ONLY valid JSON array.`;
       }
       ZENODO_API_KEY = ZENODO_API_KEY.replace(/["']/g, '').trim();
       if (!ZENODO_API_KEY) {
-        return res.status(401).send('Zenodo API Key is missing. Please enter your Zenodo Personal Access Token in API Settings.');
+        return res.status(401).json({ error: 'Zenodo API Key is missing. Please enter your Zenodo Personal Access Token in API Settings.' });
       }
 
       const originalName = file.originalname || 'paper.pdf';
@@ -2348,7 +2348,7 @@ Return a JSON array of strings. Return ONLY valid JSON array.`;
       });
     } catch (error) {
       console.error('Error uploading to Zenodo:', error);
-      res.status(500).send(`Error uploading to Zenodo: ${error instanceof Error ? error.message : String(error)}`);
+      res.status(500).json({ error: `Error uploading to Zenodo: ${error instanceof Error ? error.message : String(error)}` });
     }
   });
 
@@ -2363,7 +2363,7 @@ Return a JSON array of strings. Return ONLY valid JSON array.`;
       ZENODO_API_KEY = ZENODO_API_KEY.replace(/["']/g, '').trim();
 
       if (!depositionId || !ZENODO_API_KEY) {
-        return res.status(400).send('Deposition ID and Zenodo API Key are required.');
+        return res.status(400).json({ error: 'Deposition ID and Zenodo API Key are required.' });
       }
 
       const cleanMetadata = buildZenodoPayload(metadata);
@@ -2439,13 +2439,13 @@ Return a JSON array of strings. Return ONLY valid JSON array.`;
             detailMessage = parsedErr.message;
           }
         } catch (e) {}
-        return res.status(400).send(`Zenodo update failed: ${detailMessage}`);
+        return res.status(400).json({ error: `Zenodo update failed: ${detailMessage}` });
       }
 
       res.json({ message: 'Zenodo paper updated successfully', data: updatedDep });
     } catch (err: any) {
       console.error('Error in /api/update-zenodo-paper:', err);
-      res.status(500).send(err.message || 'Failed to update Zenodo deposition');
+      res.status(500).json({ error: err.message || 'Failed to update Zenodo deposition' });
     }
   });
 
@@ -2492,7 +2492,7 @@ Return a JSON array of strings. Return ONLY valid JSON array.`;
       res.json(allDepositions);
     } catch (err: any) {
       console.error('Error fetching Zenodo papers:', err);
-      res.status(500).send(err.message || 'Failed to fetch Zenodo depositions');
+      res.status(500).json({ error: err.message || 'Failed to fetch Zenodo depositions' });
     }
   });
 
@@ -2507,7 +2507,7 @@ Return a JSON array of strings. Return ONLY valid JSON array.`;
       ZENODO_API_KEY = ZENODO_API_KEY.replace(/["']/g, '').trim();
 
       if (!depositionId || !ZENODO_API_KEY) {
-        return res.status(400).send('Deposition ID and Zenodo API Key are required.');
+        return res.status(400).json({ error: 'Deposition ID and Zenodo API Key are required.' });
       }
 
       const baseUrls = ['https://zenodo.org/api/deposit/depositions', 'https://sandbox.zenodo.org/api/deposit/depositions'];
@@ -2541,7 +2541,7 @@ Return a JSON array of strings. Return ONLY valid JSON array.`;
       res.json({ message: 'Paper deleted from Zenodo successfully or already removed.' });
     } catch (err: any) {
       console.error('Error deleting Zenodo paper:', err);
-      res.status(500).send(err.message || 'Failed to delete Zenodo deposition');
+      res.status(500).json({ error: err.message || 'Failed to delete Zenodo deposition' });
     }
   });
 
@@ -2649,7 +2649,7 @@ You can view the full User Guide in the website footer or add your Gemini API ke
       return res.json({ reply: fallbackReply });
     } catch (err: any) {
       console.error('Error in /api/support-chat:', err);
-      res.status(500).send('Error in support chat assistant');
+      res.status(500).json({ error: 'Error in support chat assistant' });
     }
   });
 
