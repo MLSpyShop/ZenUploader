@@ -23,21 +23,21 @@ export default function Header({ user }: HeaderProps) {
   };
 
   return (
-    <header className="bg-white border-b border-slate-200 shadow-xs sticky top-0 z-50">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 py-2.5 sm:py-3.5 flex items-center justify-between gap-2 sm:gap-4">
+    <header className="bg-white border-b border-slate-200/90 shadow-xs sticky top-0 z-50">
+      <div className="max-w-7xl mx-auto px-3 sm:px-6 py-2.5 sm:py-3.5 flex items-center justify-between gap-2 sm:gap-4">
         {/* Left Side: Brand Logo & Title */}
-        <div className="flex items-center gap-2.5 sm:gap-3.5 min-w-0">
-          <Logo size="md" className="w-9 h-9 sm:w-11 sm:h-11 shrink-0" />
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+          <Logo size="md" className="w-8 h-8 sm:w-10 sm:h-10 shrink-0" />
           <div className="min-w-0">
             <div className="flex items-center gap-1.5 sm:gap-2">
-              <span className="text-lg sm:text-2xl font-bold bg-gradient-to-r from-indigo-700 via-blue-600 to-emerald-600 bg-clip-text text-transparent tracking-tight whitespace-nowrap">
+              <span className="text-base sm:text-xl font-bold bg-gradient-to-r from-indigo-700 via-blue-600 to-emerald-600 bg-clip-text text-transparent tracking-tight whitespace-nowrap">
                 ZenUploader
               </span>
-              <span className="hidden md:inline-block text-[10px] font-bold tracking-wider uppercase px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-700 border border-indigo-100">
+              <span className="hidden sm:inline-block text-[10px] font-bold tracking-wider uppercase px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-100">
                 v2.0
               </span>
             </div>
-            <p className="text-[11px] sm:text-xs text-slate-500 font-medium hidden sm:block truncate">
+            <p className="text-[11px] text-slate-500 font-medium hidden md:block truncate">
               Automated Open Science & Zenodo Upload Suite
             </p>
           </div>
@@ -45,9 +45,9 @@ export default function Header({ user }: HeaderProps) {
 
         {/* Right Side: User Profile / Auth Status */}
         {user ? (
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             <div
-              className="flex items-center gap-2 text-xs text-slate-700 bg-slate-100/90 hover:bg-slate-100 px-2.5 sm:px-3 py-1.5 rounded-full border border-slate-200 shadow-2xs transition-colors"
+              className="flex items-center gap-1.5 sm:gap-2 text-xs text-slate-700 bg-slate-100/90 hover:bg-slate-100 px-2 sm:px-3 py-1 sm:py-1.5 rounded-full border border-slate-200/80 shadow-2xs transition-colors"
               title={`Signed in as ${user.email || 'User'}`}
             >
               <span className="relative flex h-2 w-2 shrink-0">
@@ -55,9 +55,10 @@ export default function Header({ user }: HeaderProps) {
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
               </span>
 
-              {/* User Email: Truncated safely on mobile screens */}
-              <span className="font-medium max-w-[110px] sm:max-w-[180px] md:max-w-[240px] truncate text-[11px] sm:text-xs text-slate-700">
-                {user.email || 'Signed In'}
+              {/* User Email: Responsive truncation */}
+              <span className="font-medium max-w-[90px] xs:max-w-[130px] sm:max-w-[180px] md:max-w-[240px] truncate text-[11px] sm:text-xs text-slate-700">
+                {user.email ? user.email.split('@')[0] : 'User'}
+                <span className="hidden xs:inline">{user.email ? `@${user.email.split('@')[1]}` : ''}</span>
               </span>
             </div>
 
@@ -68,15 +69,15 @@ export default function Header({ user }: HeaderProps) {
               disabled={loggingOut}
               aria-label="Sign out"
               title="Sign out of your account"
-              className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-full transition-colors shrink-0"
+              className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-full transition-colors shrink-0 cursor-pointer"
             >
               <LogOut className="w-3.5 h-3.5" />
             </button>
           </div>
         ) : (
-          <div className="flex items-center gap-1.5 text-xs text-slate-500 bg-slate-50 px-2.5 py-1 rounded-full border border-slate-200/80 shrink-0">
+          <div className="flex items-center gap-1.5 text-xs text-slate-500 bg-slate-50 px-2 sm:px-2.5 py-1 rounded-full border border-slate-200/80 shrink-0">
             <span className="w-1.5 h-1.5 rounded-full bg-slate-400" />
-            <span className="text-[11px] font-medium text-slate-600 hidden xs:inline">Guest Mode</span>
+            <span className="text-[10px] sm:text-[11px] font-medium text-slate-600">Guest</span>
           </div>
         )}
       </div>
