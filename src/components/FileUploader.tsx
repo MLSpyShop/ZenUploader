@@ -5,7 +5,8 @@ import {
   Upload, CheckCircle2, Loader2, AlertCircle, CloudUpload, Key, 
   Plus, Trash2, Globe, FileText, Tag, BookOpen, HelpCircle, 
   Search, ExternalLink, Sparkles, UserCheck, FolderOpen, X, 
-  RotateCcw, ArrowUpRight, Check, Rocket, Award, Copy, ChevronDown, ChevronUp
+  RotateCcw, ArrowUpRight, Check, Rocket, Award, Copy, ChevronDown, ChevronUp,
+  ShieldCheck
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { googleSignIn } from '../auth';
@@ -14,6 +15,27 @@ import { User } from 'firebase/auth';
 function sanitizeHeader(val?: string): string {
   if (!val || typeof val !== 'string') return '';
   return val.replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+}
+
+async function safeJsonParse(response: Response): Promise<{ ok: boolean; status: number; data: any; text: string }> {
+  let text = '';
+  try {
+    text = await response.text();
+  } catch (err: any) {
+    text = '';
+  }
+  let data: any = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {}
+  }
+  return {
+    ok: response.ok,
+    status: response.status,
+    data,
+    text
+  };
 }
 
 function getSafeFileName(rawFile?: any): string {
@@ -62,33 +84,63 @@ function getSafeHref(urlStr: any): string {
   return '#';
 }
 
-function isJunkTitle(str: string): boolean {
+function isGibberish(str: string): boolean {
   if (!str || typeof str !== 'string') return true;
   const trimmed = str.trim();
   if (trimmed.length < 3) return true;
   if (!/[\p{L}]/u.test(trimmed)) return true;
+  const letters = trimmed.replace(/[^\p{L}]/gu, '');
+  if (letters.length < 2) return true;
+  return false;
+}
 
-  if (/Identity-H|CIDInit|FontName|ProcSet|Encoding|Type1|TrueType|Adobe|CoreGraphics|XObject|trailer|xref|startxref|obj\b|endobj\b|stream\b|endstream\b|PDF-1\.|CMap|CIDFont/i.test(trimmed)) {
+function isJunkTitle(str: string): boolean {
+  if (!str || typeof str !== 'string') return true;
+  if (isGibberish(str)) return true;
+  const trimmed = str.trim();
+  if (trimmed.length < 3) return true;
+  if (!/[\p{L}]/u.test(trimmed)) return true;
+
+  // TeX / pdfTeX / LaTeX engine metadata strings & binary markers
+  if (/^(?:pdftex|pdflatex|tex\s*live|hyperref|pdfinfo|dvips|xetex|luatex|pdfpages|graphicx)$/i.test(trimmed)) {
     return true;
   }
-  if (/^(?:ieee\s+trans|acm\s+trans|proceedings\s+of|journal\s+of|international\s+conference|springer|elsevier|wiley|nature\s+publishing|nature\s+communications|science\s+advances|plos\s+one|frontiers\s+in|mdpi|cell\s+press|biomed\s+central|annual\s+review)/i.test(trimmed)) {
+
+  // Internal PDF font/stream markers
+  if (/^(?:Identity-H|CIDInit|FontName|ProcSet|Encoding|Type1|TrueType|Adobe|CoreGraphics|XObject|trailer|xref|startxref|obj\b|endobj\b|stream\b|endstream\b|PDF-1\.|CMap|CIDFont)$/i.test(trimmed)) {
     return true;
   }
-  if (/^(?:vol\.\s*\d+|volume\s+\d+|issue\s+\d+|no\.\s*\d+|pp\.\s*\d+|page\s+\d+|\d+\s+of\s+\d+|issn\s*[:\d-]+|isbn\s*[:\d-]+)/i.test(trimmed)) {
+
+  // Standalone Journal / Conference / Publisher banner headers
+  if (/^(?:ieee\s+transactions\s+on[^\n:–-]+|proceedings\s+of\s+the[^\n:–-]+|springer|elsevier|wiley|nature\s+publishing\s+group|nature\s+communications|science\s+advances|plos\s+one|frontiers\s+in\s+\w+|mdpi|cell\s+press|biomed\s+central|annual\s+reviews?)$/i.test(trimmed)) {
     return true;
   }
-  if (/^(?:arxiv:\s*\d|biorxiv\s+preprint|medrxiv\s+preprint|chemrxiv|ssrn|under\s+review|preprint\.|manuscript\s+received|accepted\s+for\s+publication|draft\s+version)/i.test(trimmed)) {
+
+  // Standalone Volume / Issue / Page metadata
+  if (/^(?:vol\.\s*\d+|volume\s+\d+|issue\s+\d+|no\.\s*\d+|pp\.\s*\d+(?:-\d+)?|page\s+\d+|\d+\s+of\s+\d+|issn\s*[:\d-]+|isbn\s*[:\d-]+)$/i.test(trimmed)) {
     return true;
   }
-  if (/^(?:copyright\s+©?|all\s+rights\s+reserved|published\s+by|distributed\s+under|open\s+access|creative\s+commons|cc\s+by|downloaded\s+from|available\s+online\s+at)/i.test(trimmed)) {
+
+  // Standalone Preprint / Status headers
+  if (/^(?:arxiv:\s*\d{4}\.\d{4,5}(?:v\d+)?|biorxiv\s+preprint|medrxiv\s+preprint|chemrxiv|ssrn|under\s+review|preprint\.|manuscript\s+received|accepted\s+for\s+publication|draft\s+version)$/i.test(trimmed)) {
     return true;
   }
-  if (/^(?:https?:\/\/|www\.|doi\s*:|10\.\d{4,9}\/)/i.test(trimmed)) {
+
+  // Standalone Copyright / Downloaded lines
+  if (/^(?:copyright\s+©?.*|all\s+rights\s+reserved.*|published\s+by\s+.*|distributed\s+under\s+.*|open\s+access|creative\s+commons\s+.*|cc\s+by\s+.*|downloaded\s+from\s+.*|available\s+online\s+at\s+.*)$/i.test(trimmed) && trimmed.length < 100) {
     return true;
   }
+
+  // Standalone URLs / DOIs
+  if (/^(?:https?:\/\/\S+|www\.\S+|doi\s*:\s*10\.\d{4,9}\/\S+|10\.\d{4,9}\/\S+)$/i.test(trimmed)) {
+    return true;
+  }
+
+  // Section headings mistaken for title
   if (/^(?:abstract|summary|introduction|keywords|index\s+terms|table\s+of\s+contents|references|acknowledgments|contents|appendix|conclusion|background|results|discussion)$/i.test(trimmed)) {
     return true;
   }
+
   const wordChars = trimmed.replace(/[^\p{L}\p{N}]/gu, '').length;
   if (wordChars < trimmed.length * 0.25) return true;
 
@@ -347,11 +399,21 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
 
   // Settings & Authentication states
   const [zenodoApiKey, setZenodoApiKey] = useState<string>('');
+  const [zenodoEnv, setZenodoEnv] = useState<'auto' | 'production' | 'sandbox' | 'demo'>('auto');
   const [geminiApiKey, setGeminiApiKey] = useState<string>('');
   const [savingKey, setSavingKey] = useState(false);
   const [keysSaved, setKeysSaved] = useState(false);
+  const [verifyingKey, setVerifyingKey] = useState(false);
+  const [verifyStatus, setVerifyStatus] = useState<{ success?: boolean; message?: string; error?: string } | null>(null);
   const [signingIn, setSigningIn] = useState(false);
   const [showApiSettings, setShowApiSettings] = useState(false);
+  const [authErrorInfo, setAuthErrorInfo] = useState<{
+    is403: boolean;
+    isIpRestricted?: boolean;
+    message: string;
+    suggestDemo?: boolean;
+  } | null>(null);
+  const [demoNotice, setDemoNotice] = useState(false);
 
   // Generation loading states
   const [loadingWhoisIndex, setLoadingWhoisIndex] = useState<number | null>(null);
@@ -359,8 +421,8 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
   const [enrichSuccessMsg, setEnrichSuccessMsg] = useState(false);
   const [generatingSection, setGeneratingSection] = useState<string | null>(null);
 
-  // Active section tab in reviewer
-  const [activeReviewTab, setActiveReviewTab] = useState<'general' | 'insights' | 'science' | 'glossary_faq' | 'seo_deploy'>('general');
+  // Active section tab in reviewer ('all_combined' allows viewing all generated sections on one single page)
+  const [activeReviewTab, setActiveReviewTab] = useState<'all_combined' | 'general' | 'insights' | 'science' | 'glossary_faq' | 'seo_deploy'>('all_combined');
 
   const applySavedProfile = (metadata: any) => {
     if (!savedAuthorProfile || !metadata || !metadata.authors) return metadata;
@@ -436,6 +498,7 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
   const loadZenodoApiKey = async (uid?: string) => {
     try {
       let zKey = localStorage.getItem('zenodo_api_key') || '';
+      let zEnv = (localStorage.getItem('zenodo_env') as any) || 'auto';
       let gKey = localStorage.getItem('gemini_api_key') || '';
       if (uid) {
         const docRef = doc(db, 'users', uid, 'settings', 'zenodo');
@@ -443,10 +506,12 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
         if (docSnap.exists()) {
           const data = docSnap.data();
           if (data.zenodoApiKey) zKey = data.zenodoApiKey;
+          if (data.zenodoEnv) zEnv = data.zenodoEnv;
           if (data.geminiApiKey) gKey = data.geminiApiKey;
         }
       }
       setZenodoApiKey(zKey);
+      setZenodoEnv(zEnv);
       setGeminiApiKey(gKey);
     } catch (err) {
       console.error('Failed to load API Keys:', err);
@@ -457,10 +522,11 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
     setSavingKey(true);
     try {
       localStorage.setItem('zenodo_api_key', zenodoApiKey);
+      localStorage.setItem('zenodo_env', zenodoEnv);
       localStorage.setItem('gemini_api_key', geminiApiKey);
       if (user && user.uid) {
         const docRef = doc(db, 'users', user.uid, 'settings', 'zenodo');
-        await setDoc(docRef, { zenodoApiKey, geminiApiKey }, { merge: true });
+        await setDoc(docRef, { zenodoApiKey, zenodoEnv, geminiApiKey }, { merge: true });
       }
       setKeysSaved(true);
       setTimeout(() => setKeysSaved(false), 3000);
@@ -469,6 +535,32 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
       setError('Failed to save API Keys.');
     } finally {
       setSavingKey(false);
+    }
+  };
+
+  const handleVerifyZenodoToken = async () => {
+    if (!zenodoApiKey.trim()) {
+      setVerifyStatus({ error: 'Please enter your Zenodo Personal Access Token first.' });
+      return;
+    }
+    setVerifyingKey(true);
+    setVerifyStatus(null);
+    try {
+      const res = await fetch('/api/verify-zenodo-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ zenodoApiKey, zenodoEnv })
+      });
+      const { ok, data } = await safeJsonParse(res);
+      if (ok && data?.valid) {
+        setVerifyStatus({ success: true, message: data.message });
+      } else {
+        setVerifyStatus({ error: data?.error || 'Failed to verify Zenodo token.' });
+      }
+    } catch (err: any) {
+      setVerifyStatus({ error: err?.message || 'Network error verifying Zenodo token.' });
+    } finally {
+      setVerifyingKey(false);
     }
   };
 
@@ -668,14 +760,11 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
         });
         clearTimeout(timeoutId);
 
-        if (response.ok) {
-          data = await response.json();
+        const { ok, data: resData, text: resText } = await safeJsonParse(response);
+        if (ok && resData && typeof resData === 'object') {
+          data = resData;
         } else {
-          let errMessage = 'Server returned an error';
-          try {
-            const errData = await response.json();
-            errMessage = errData?.error || errData?.message || errMessage;
-          } catch {}
+          const errMessage = resData?.error || resData?.message || (resText && resText.length < 200 && !resText.includes('<html') ? resText : 'Server returned an unparseable response');
           console.warn('Server PDF processing note:', errMessage);
         }
       } catch (fetchErr: any) {
@@ -795,14 +884,12 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
           ...extraPayload
         })
       });
-      if (res.ok) {
-        const data = await res.json();
-        if (data[keyName] !== undefined) {
-          setEditableMetadata((prev: any) => ({
-            ...prev,
-            [keyName]: data[keyName]
-          }));
-        }
+      const { ok, data } = await safeJsonParse(res);
+      if (ok && data && data[keyName] !== undefined) {
+        setEditableMetadata((prev: any) => ({
+          ...prev,
+          [keyName]: data[keyName]
+        }));
       }
     } catch (err) {
       console.error(`Failed to generate ${keyName}:`, err);
@@ -827,8 +914,8 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
           geminiApiKey: cleanGeminiKey
         })
       });
-      if (res.ok) {
-        const data = await res.json();
+      const { ok, data } = await safeJsonParse(res);
+      if (ok && data) {
         const updatedAuthors = [...(editableMetadata.authors || [])];
         updatedAuthors[authorIdx] = {
           ...updatedAuthors[authorIdx],
@@ -858,13 +945,11 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
           geminiApiKey: cleanGeminiKey
         })
       });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.metadata) {
-          setEditableMetadata(data.metadata);
-          setEnrichSuccessMsg(true);
-          setTimeout(() => setEnrichSuccessMsg(false), 5000);
-        }
+      const { ok, data } = await safeJsonParse(res);
+      if (ok && data?.metadata) {
+        setEditableMetadata(data.metadata);
+        setEnrichSuccessMsg(true);
+        setTimeout(() => setEnrichSuccessMsg(false), 5000);
       }
     } catch (err) {
       console.error('Failed to enrich all metadata:', err);
@@ -873,11 +958,32 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
     }
   };
 
+  // Automatically trigger full-spectrum AI generation on load if sections are incomplete
+  useEffect(() => {
+    if (editableMetadata && editableMetadata.title && !enrichingAll && (!editableMetadata.tldr || !editableMetadata.glossary || editableMetadata.glossary.length === 0)) {
+      handleEnrichAll();
+    }
+  }, [editableMetadata?.title]);
+
   // Step 4: Final upload to Zenodo
   const handleUploadToZenodo = async () => {
+    // 1. If in demo mode, proceed directly without requiring an API key
+    if (zenodoEnv === 'demo') {
+      await handleSimulatedDeposit();
+      return;
+    }
+
     const cleanZenodoKey = (zenodoApiKey || '').trim();
     if (!cleanZenodoKey) {
-      setError('Zenodo Personal Access Token is required. Please click "API Settings" above to enter your token.');
+      const missingKeyMsg = 'Zenodo Personal Access Token is required to deposit directly to Zenodo. Please enter your token in API Settings or use Instant Demo Deposit.';
+      setError(missingKeyMsg);
+      setAuthErrorInfo({
+        is403: false,
+        is401: true,
+        isIpRestricted: false,
+        message: missingKeyMsg,
+        suggestDemo: true
+      });
       setShowApiSettings(true);
       apiKeysRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
       return;
@@ -887,6 +993,7 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
     if (!file && existingDepositionId && !String(existingDepositionId).startsWith('local_') && !String(existingDepositionId).startsWith('paper_')) {
       setIsUploadingToZenodo(true);
       setError(null);
+      setAuthErrorInfo(null);
       try {
         const updateRes = await fetch('/api/update-zenodo-paper', {
           method: 'PUT',
@@ -894,14 +1001,27 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
           body: JSON.stringify({
             depositionId: existingDepositionId,
             metadata: editableMetadata,
-            zenodoApiKey: cleanZenodoKey
+            zenodoApiKey: cleanZenodoKey,
+            zenodoEnv
           })
         });
-        if (!updateRes.ok) {
-          const errData = await updateRes.json().catch(() => ({}));
-          throw new Error(errData?.error || 'Failed to update Zenodo deposition');
+        const { ok, status, data: updatedData, text: updateText } = await safeJsonParse(updateRes);
+        if (!ok) {
+          const errMsg = updatedData?.error || updatedData?.message || (updateText && updateText.length < 300 && !updateText.includes('<html') ? updateText : `Failed to update Zenodo deposition (${status})`);
+          if (status === 401 || status === 403) {
+            setAuthErrorInfo({
+              is403: status === 403,
+              is401: status === 401,
+              isIpRestricted: errMsg.includes('IP Restriction') || errMsg.includes('unusual traffic'),
+              message: errMsg,
+              suggestDemo: true
+            });
+          }
+          throw new Error(errMsg);
         }
-        const updatedData = await updateRes.json();
+        if (!updatedData) {
+          throw new Error('Received unexpected response format when updating deposition.');
+        }
         setZenodoReceipt(updatedData);
         try {
           await savePaperToHistory(editableMetadata, 'uploaded', updatedData);
@@ -922,6 +1042,7 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
 
     setIsUploadingToZenodo(true);
     setError(null);
+    setAuthErrorInfo(null);
     try {
       const formData = new FormData();
       const safeFileName = getSafeFileName(file);
@@ -937,31 +1058,58 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
         formData.append('metadata', JSON.stringify(editableMetadata));
       }
       formData.append('zenodoApiKey', cleanZenodoKey);
+      formData.append('zenodoEnv', zenodoEnv);
       
       const response = await fetch('/api/upload-to-zenodo', {
         method: 'POST',
         body: formData,
       });
-      if (!response.ok) {
-        let errMessage = 'Failed to upload to Zenodo';
-        try {
-          const errData = await response.json();
-          errMessage = errData?.error || errData?.message || (typeof errData === 'string' ? errData : JSON.stringify(errData));
-        } catch {
-          try {
-            const errText = await response.text();
-            if (errText) errMessage = errText;
-          } catch {}
+
+      const { ok, status, data, text } = await safeJsonParse(response);
+      if (!ok) {
+        let errMessage = data?.error || data?.message;
+        if (!errMessage) {
+          if (text && text.length < 500 && !text.includes('<html') && !text.includes('<!DOCTYPE')) {
+            errMessage = text;
+          } else if (status === 413) {
+            errMessage = 'The uploaded PDF file is too large for transmission. Please use a compressed or smaller PDF file.';
+          } else if (status === 502 || status === 504) {
+            errMessage = 'Zenodo upload request timed out. Zenodo servers may be busy. Please try again.';
+          } else if (status === 401 || status === 403) {
+            errMessage = status === 401 
+              ? 'Zenodo authentication failed (401). Invalid token or environment mismatch between Production and Sandbox.'
+              : 'Zenodo permission denied (403). Personal Access Token requires "deposit:write" and "deposit:actions" scopes.';
+          } else {
+            errMessage = `Upload failed with status ${status}. Please verify your token and settings.`;
+          }
         }
+
+        const is403 = status === 403 || data?.isPermissionDenied || errMessage.includes('403') || errMessage.includes('Permission Denied');
+        const is401 = status === 401 || errMessage.includes('401') || errMessage.toLowerCase().includes('authentication failed');
+        const isIpRestricted = data?.isIpRestricted || errMessage.includes('IP Restriction') || errMessage.includes('unusual traffic');
+        if (is403 || is401) {
+          setAuthErrorInfo({
+            is403: is403,
+            is401: is401,
+            isIpRestricted: isIpRestricted,
+            message: errMessage,
+            suggestDemo: true
+          });
+        }
+
         throw new Error(errMessage);
       }
-      const data = await response.json();
+
+      if (!data || typeof data !== 'object') {
+        throw new Error('Received unexpected non-JSON response from upload service. Please try again.');
+      }
       
       try {
         await savePaperToHistory(editableMetadata || { title: (file as any)?.name || 'Research Paper' }, 'uploaded', data);
       } catch (saveErr) {}
       
       setZenodoReceipt(data);
+      setDemoNotice(data?.environment === 'demo' || data?.isSimulation === true);
     } catch (err: any) {
       console.error('Zenodo upload failed:', err);
       let msg = err?.message || 'Failed to upload to Zenodo';
@@ -969,6 +1117,55 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
         msg = 'Connection to upload service timed out or was interrupted. Please try again.';
       }
       setError(msg);
+
+      const is403 = msg.includes('403') || msg.includes('Permission Denied');
+      const is401 = msg.includes('401') || msg.toLowerCase().includes('authentication failed') || msg.toLowerCase().includes('token is missing') || msg.toLowerCase().includes('token is required');
+      const isIpBlocked = msg.includes('IP Restriction') || msg.includes('unusual traffic');
+      if (is403 || is401) {
+        setAuthErrorInfo({
+          is403: is403,
+          is401: is401,
+          isIpRestricted: isIpBlocked,
+          message: msg,
+          suggestDemo: true
+        });
+      }
+
+      if (msg.includes('403') || msg.includes('401') || msg.includes('Permission Denied') || msg.toLowerCase().includes('token')) {
+        setShowApiSettings(true);
+        setTimeout(() => {
+          apiKeysRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }, 150);
+      }
+    } finally {
+      setIsUploadingToZenodo(false);
+    }
+  };
+
+  const handleSimulatedDeposit = async () => {
+    setIsUploadingToZenodo(true);
+    setError(null);
+    setAuthErrorInfo(null);
+    try {
+      const res = await fetch('/api/demo-zenodo-upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          metadata: editableMetadata || { title: (file as any)?.name || 'Research Paper' },
+          filename: file ? getSafeFileName(file) : 'paper.pdf'
+        })
+      });
+      const { ok, data } = await safeJsonParse(res);
+      if (!ok || !data) {
+        throw new Error('Failed to generate simulation receipt.');
+      }
+      try {
+        await savePaperToHistory(editableMetadata || { title: (file as any)?.name || 'Research Paper' }, 'uploaded', data);
+      } catch (saveErr) {}
+      setZenodoReceipt(data);
+      setDemoNotice(true);
+    } catch (simErr: any) {
+      setError(simErr?.message || 'Failed to simulate Zenodo deposit.');
     } finally {
       setIsUploadingToZenodo(false);
     }
@@ -1125,54 +1322,186 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
             exit={{ opacity: 0, height: 0 }}
             className="mb-6 overflow-hidden"
           >
-            <div ref={apiKeysRef} className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-3">
+            <div ref={apiKeysRef} className="p-5 bg-slate-50 rounded-2xl border border-slate-200 space-y-4 shadow-xs">
               <div className="flex items-center justify-between">
                 <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
-                  <Key className="w-3.5 h-3.5 text-indigo-600" /> API Credentials
+                  <Key className="w-3.5 h-3.5 text-indigo-600" /> API Credentials & Environment Settings
                 </h3>
                 <span className="text-[11px] text-slate-500">Stored safely in browser / Firestore</span>
               </div>
               
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-[11px] font-bold text-slate-700 mb-1">Zenodo Access Token</label>
-                  <input
-                    type="password"
-                    value={zenodoApiKey}
-                    onChange={(e) => setZenodoApiKey(e.target.value)}
-                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono"
-                    placeholder="Zenodo Personal Access Token"
-                  />
-                  <p className="text-[10px] text-slate-400 mt-1">Requires deposit:write & deposit:actions scopes.</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                      Zenodo Personal Access Token
+                    </label>
+                    <input
+                      type="password"
+                      value={zenodoApiKey}
+                      onChange={(e) => {
+                        setZenodoApiKey(e.target.value);
+                        setVerifyStatus(null);
+                      }}
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                      placeholder="Zenodo Personal Access Token"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-600 mb-1">Target Environment</label>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[11px]">
+                      <button
+                        type="button"
+                        onClick={() => setZenodoEnv('auto')}
+                        className={`px-2 py-1.5 rounded-lg border font-medium cursor-pointer transition-all ${
+                          zenodoEnv === 'auto'
+                            ? 'bg-indigo-600 text-white border-indigo-600 font-bold shadow-xs'
+                            : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
+                        }`}
+                      >
+                        Auto-Detect
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setZenodoEnv('production')}
+                        className={`px-2 py-1.5 rounded-lg border font-medium cursor-pointer transition-all ${
+                          zenodoEnv === 'production'
+                            ? 'bg-indigo-600 text-white border-indigo-600 font-bold shadow-xs'
+                            : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
+                        }`}
+                      >
+                        Production
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setZenodoEnv('sandbox')}
+                        className={`px-2 py-1.5 rounded-lg border font-medium cursor-pointer transition-all ${
+                          zenodoEnv === 'sandbox'
+                            ? 'bg-indigo-600 text-white border-indigo-600 font-bold shadow-xs'
+                            : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
+                        }`}
+                      >
+                        Sandbox
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setZenodoEnv('demo')}
+                        className={`px-2 py-1.5 rounded-lg border font-medium cursor-pointer transition-all ${
+                          zenodoEnv === 'demo'
+                            ? 'bg-purple-600 text-white border-purple-600 font-bold shadow-xs'
+                            : 'bg-purple-50 text-purple-700 border-purple-200 hover:bg-purple-100'
+                        }`}
+                      >
+                        Demo Mode
+                      </button>
+                    </div>
+                  </div>
+
+                  {zenodoEnv === 'demo' ? (
+                    <div className="p-2.5 bg-purple-50 border border-purple-200 rounded-xl text-[10px] text-purple-900 space-y-1">
+                      <p className="font-semibold flex items-center gap-1 text-purple-800">
+                        <Sparkles className="w-3.5 h-3.5 text-purple-600 shrink-0" /> Demo & Simulation Mode Active:
+                      </p>
+                      <p className="text-purple-700 leading-relaxed">
+                        In Demo Mode, depositions are simulated with realistic DOIs, metadata registration, APA & BibTeX citations without needing a live Zenodo token or worrying about datacenter IP rate limits.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="p-2.5 bg-blue-50/70 border border-blue-100 rounded-xl text-[10px] text-blue-900 space-y-1">
+                      <p className="font-semibold flex items-center gap-1">
+                        <ShieldCheck className="w-3 h-3 text-blue-600 shrink-0" /> Required Token Permissions:
+                      </p>
+                      <p className="text-slate-600">
+                        When creating your token, you must check <code className="bg-white px-1 py-0.5 rounded border border-blue-200 font-mono text-[9px] font-bold text-blue-700">deposit:write</code> and <code className="bg-white px-1 py-0.5 rounded border border-blue-200 font-mono text-[9px] font-bold text-blue-700">deposit:actions</code>.
+                      </p>
+                      <div className="flex items-center gap-3 pt-0.5">
+                        <a 
+                          href="https://zenodo.org/account/settings/applications/tokens/new/" 
+                          target="_blank" 
+                          rel="noreferrer"
+                          className="text-indigo-600 hover:text-indigo-800 underline font-bold inline-flex items-center gap-0.5"
+                        >
+                          Zenodo Production Token <ExternalLink className="w-2.5 h-2.5" />
+                        </a>
+                        <a 
+                          href="https://sandbox.zenodo.org/account/settings/applications/tokens/new/" 
+                          target="_blank" 
+                          rel="noreferrer"
+                          className="text-indigo-600 hover:text-indigo-800 underline font-bold inline-flex items-center gap-0.5"
+                        >
+                          Sandbox Token <ExternalLink className="w-2.5 h-2.5" />
+                        </a>
+                      </div>
+                    </div>
+                  )}
                 </div>
-                <div>
-                  <label className="block text-[11px] font-bold text-slate-700 mb-1">Gemini API Key (Optional)</label>
-                  <input
-                    type="password"
-                    value={geminiApiKey}
-                    onChange={(e) => setGeminiApiKey(e.target.value)}
-                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono"
-                    placeholder="Custom Gemini API Key (Optional)"
-                  />
-                  <p className="text-[10px] text-slate-400 mt-1">Uses server default if left blank.</p>
+
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Gemini API Key (Optional)</label>
+                    <input
+                      type="password"
+                      value={geminiApiKey}
+                      onChange={(e) => setGeminiApiKey(e.target.value)}
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                      placeholder="Custom Gemini API Key (Optional)"
+                    />
+                    <p className="text-[10px] text-slate-400 mt-1">Uses server default if left blank.</p>
+                  </div>
+
+                  {verifyStatus && (
+                    <div className={`p-3 rounded-xl border text-xs ${
+                      verifyStatus.success 
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-800' 
+                        : 'bg-amber-50 border-amber-200 text-amber-900'
+                    }`}>
+                      <div className="flex items-start gap-2">
+                        {verifyStatus.success ? (
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                        ) : (
+                          <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                        )}
+                        <div>
+                          <p className="font-semibold">{verifyStatus.success ? 'Token Verified' : 'Token Check Notice'}</p>
+                          <p className="text-[11px] mt-0.5">{verifyStatus.message || verifyStatus.error}</p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
-              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200">
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-slate-200">
                 <button
                   type="button"
-                  onClick={saveApiKeys}
-                  disabled={savingKey}
-                  className="px-4 py-1.5 bg-indigo-600 text-white rounded-xl font-bold text-xs hover:bg-indigo-700 transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  onClick={handleVerifyZenodoToken}
+                  disabled={verifyingKey || !zenodoApiKey.trim()}
+                  className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-xs transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-40"
                 >
-                  {savingKey ? (
-                    <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Saving...</>
-                  ) : keysSaved ? (
-                    <><CheckCircle2 className="w-3.5 h-3.5" /> Saved!</>
+                  {verifyingKey ? (
+                    <><Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" /> Verifying with Zenodo...</>
                   ) : (
-                    'Save Settings'
+                    <><ShieldCheck className="w-3.5 h-3.5 text-indigo-600" /> Test Token & Scopes</>
                   )}
                 </button>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={saveApiKeys}
+                    disabled={savingKey}
+                    className="px-4 py-1.5 bg-indigo-600 text-white rounded-xl font-bold text-xs hover:bg-indigo-700 transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shadow-xs"
+                  >
+                    {savingKey ? (
+                      <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Saving...</>
+                    ) : keysSaved ? (
+                      <><CheckCircle2 className="w-3.5 h-3.5" /> Saved!</>
+                    ) : (
+                      'Save Settings'
+                    )}
+                  </button>
+                </div>
               </div>
             </div>
           </motion.div>
@@ -1196,29 +1525,73 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
         </div>
       )}
 
-      {/* Error banner */}
+      {/* Error banner with Quick Fix Actions */}
       {error && (
-        <div className="mb-6 p-4 bg-red-50 rounded-xl border border-red-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-red-700">
-          <div className="flex items-center gap-3">
-            <AlertCircle className="w-5 h-5 shrink-0" />
-            <span className="text-sm font-medium">{error}</span>
+        <div className="mb-6 p-4 bg-red-50 rounded-xl border border-red-200 text-red-700 space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-start sm:items-center gap-3">
+              <AlertCircle className="w-5 h-5 text-red-600 shrink-0 mt-0.5 sm:mt-0" />
+              <div className="text-sm font-medium leading-relaxed">{error}</div>
+            </div>
+            <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
+              <button
+                type="button"
+                onClick={handleStartOver}
+                className="px-2.5 py-1 text-xs font-bold text-red-700 bg-red-100 hover:bg-red-200 rounded-lg shrink-0 cursor-pointer"
+              >
+                Start Fresh
+              </button>
+              <button
+                type="button"
+                onClick={() => setError(null)}
+                className="text-xs font-bold text-red-600 hover:text-red-800 underline shrink-0 cursor-pointer"
+              >
+                Dismiss
+              </button>
+            </div>
           </div>
-          <div className="flex items-center gap-2 self-end sm:self-center">
-            <button
-              type="button"
-              onClick={handleStartOver}
-              className="px-2.5 py-1 text-xs font-bold text-red-700 bg-red-100 hover:bg-red-200 rounded-lg shrink-0 cursor-pointer"
-            >
-              Start Fresh
-            </button>
-            <button
-              type="button"
-              onClick={() => setError(null)}
-              className="text-xs font-bold text-red-600 hover:text-red-800 underline shrink-0 cursor-pointer"
-            >
-              Dismiss
-            </button>
-          </div>
+
+          {(error.includes('403') || error.includes('Permission Denied') || error.toLowerCase().includes('zenodo') || error.includes('401') || error.toLowerCase().includes('token') || authErrorInfo) && (
+            <div className="pt-2.5 border-t border-red-200/80 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="text-red-800 font-medium">
+                <span>💡 Fix: You can continue instantly in <strong>Demo Mode</strong>, switch to <strong>Sandbox</strong>, or check token scopes.</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleSimulatedDeposit}
+                  disabled={isUploadingToZenodo}
+                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg text-xs transition-all flex items-center gap-1 cursor-pointer shadow-xs"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Continue in Demo Mode</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setZenodoEnv('sandbox');
+                    setShowApiSettings(true);
+                    setTimeout(() => apiKeysRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+                  }}
+                  className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-lg text-xs transition-all flex items-center gap-1 cursor-pointer shadow-xs"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span>Use Sandbox</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowApiSettings(true);
+                    setTimeout(() => apiKeysRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+                  }}
+                  className="px-3 py-1.5 bg-white border border-red-300 hover:bg-red-50 text-red-700 font-bold rounded-lg text-xs transition-all flex items-center gap-1 cursor-pointer shadow-2xs"
+                >
+                  <Key className="w-3.5 h-3.5 text-red-600" />
+                  <span>Edit Token</span>
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -1333,8 +1706,19 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
                   <CheckCircle2 className="w-6 h-6" />
                 </div>
                 <div>
-                  <h3 className="text-base font-bold text-emerald-950">Step 4 Complete: Upload Successful!</h3>
-                  <p className="text-xs text-emerald-800">Your research paper has been deposited to Zenodo and assigned a DOI.</p>
+                  <h3 className="text-base font-bold text-emerald-950 flex items-center gap-2 flex-wrap">
+                    <span>Step 4 Complete: {zenodoReceipt.environment === 'demo' || zenodoReceipt.isSimulation ? 'Deposition Generated!' : 'Upload Successful!'}</span>
+                    {(zenodoReceipt.environment === 'demo' || zenodoReceipt.isSimulation) && (
+                      <span className="px-2 py-0.5 bg-purple-100 border border-purple-200 text-purple-800 rounded-md text-[10px] uppercase font-bold tracking-wider">
+                        Demo Mode
+                      </span>
+                    )}
+                  </h3>
+                  <p className="text-xs text-emerald-800">
+                    {zenodoReceipt.environment === 'demo' || zenodoReceipt.isSimulation
+                      ? 'Your research paper has been deposited in Demo Mode with a simulated DOI, APA & BibTeX citations, and metadata record.'
+                      : 'Your research paper has been deposited to Zenodo and assigned a DOI.'}
+                  </p>
                 </div>
               </div>
 
@@ -1499,58 +1883,19 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
             </div>
           </div>
 
-          {/* Section Navigation Tabs */}
-          <div className="flex flex-wrap gap-1.5 p-1.5 bg-slate-100 rounded-2xl border border-slate-200">
-            <button
-              type="button"
-              onClick={() => setActiveReviewTab('general')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                activeReviewTab === 'general' ? 'bg-white text-indigo-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              General & Authors
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveReviewTab('insights')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                activeReviewTab === 'insights' ? 'bg-white text-indigo-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              TL;DR & Abstract
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveReviewTab('science')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                activeReviewTab === 'science' ? 'bg-white text-indigo-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              Novelties & Benchmarks
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveReviewTab('glossary_faq')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                activeReviewTab === 'glossary_faq' ? 'bg-white text-indigo-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              Glossary & FAQs ({editableMetadata.faq?.length || 0})
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveReviewTab('seo_deploy')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                activeReviewTab === 'seo_deploy' ? 'bg-white text-indigo-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              SEO & Deployments
-            </button>
-          </div>
+          {/* Active Loading Indicator Banner when auto-enriching */}
+          {enrichingAll && (
+            <div className="p-4 bg-blue-50 border border-blue-200 rounded-2xl flex items-center gap-3 text-xs text-blue-900 animate-pulse shadow-xs">
+              <Loader2 className="w-5 h-5 text-blue-600 animate-spin shrink-0" />
+              <div>
+                <p className="font-bold">Auto-generating paper insights, glossary, FAQs, and metadata...</p>
+                <p className="text-[11px] text-blue-700">All sections are being populated automatically on this page.</p>
+              </div>
+            </div>
+          )}
 
-          {/* TAB 1: General & Authors */}
-          {activeReviewTab === 'general' && (
-            <div className="p-5 bg-white rounded-2xl border border-slate-200 space-y-6">
+          {/* Section 1: General & Authors */}
+          <div className="p-5 bg-white rounded-2xl border border-slate-200 space-y-6">
               
               <div className="space-y-4">
                 <div>
@@ -1741,11 +2086,9 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
               </div>
 
             </div>
-          )}
 
-          {/* TAB 2: TL;DR & Abstract */}
-          {activeReviewTab === 'insights' && (
-            <div className="p-5 bg-white rounded-2xl border border-slate-200 space-y-6">
+          {/* Section 2: TL;DR & Abstract */}
+          <div className="p-5 bg-white rounded-2xl border border-slate-200 space-y-6">
               
               {/* TL;DR */}
               <div className="bg-emerald-50/70 border border-emerald-200 rounded-2xl p-4 space-y-2">
@@ -1855,11 +2198,9 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
               </div>
 
             </div>
-          )}
 
-          {/* TAB 3: Novelties & Benchmarks */}
-          {activeReviewTab === 'science' && (
-            <div className="p-5 bg-white rounded-2xl border border-slate-200 space-y-6">
+          {/* Section 3: Novelties & Benchmarks */}
+          <div className="p-5 bg-white rounded-2xl border border-slate-200 space-y-6">
               
               {/* Novelties */}
               <div className="space-y-2">
@@ -2008,11 +2349,9 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
               </div>
 
             </div>
-          )}
 
-          {/* TAB 4: Glossary & FAQs */}
-          {activeReviewTab === 'glossary_faq' && (
-            <div className="p-5 bg-white rounded-2xl border border-slate-200 space-y-6">
+          {/* Section 4: Glossary & FAQs */}
+          <div className="p-5 bg-white rounded-2xl border border-slate-200 space-y-6">
               
               {/* Detailed Glossary */}
               <div className="space-y-3">
@@ -2165,11 +2504,9 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
               </div>
 
             </div>
-          )}
 
-          {/* TAB 5: SEO & Deployments */}
-          {activeReviewTab === 'seo_deploy' && (
-            <div className="p-5 bg-white rounded-2xl border border-slate-200 space-y-6">
+          {/* Section 5: SEO & Deployments */}
+          <div className="p-5 bg-white rounded-2xl border border-slate-200 space-y-6">
               
               {/* Long Tail Keywords */}
               <div className="space-y-2">
@@ -2275,9 +2612,69 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
               </div>
 
             </div>
-          )}
 
           {/* Bottom Step 4 Action Footer */}
+          {authErrorInfo && (
+            <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl text-amber-900 space-y-3 shadow-xs">
+              <div className="flex items-start gap-3">
+                <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <div className="text-xs font-bold uppercase tracking-wider text-amber-800">
+                    {authErrorInfo.isIpRestricted 
+                      ? 'Zenodo Datacenter IP Restriction (403)' 
+                      : authErrorInfo.is401 
+                        ? 'Zenodo Authentication Required (401)' 
+                        : 'Zenodo Token Permission Denied (403)'}
+                  </div>
+                  <div className="text-xs text-amber-900 leading-relaxed">
+                    {authErrorInfo.isIpRestricted 
+                      ? 'Zenodo Production has restricted direct API calls from cloud datacenter IPs. You can continue instantly in Demo Mode with full citation data, or switch to Zenodo Sandbox.'
+                      : authErrorInfo.is401
+                        ? 'A valid Zenodo Personal Access Token is required to communicate with the live Zenodo repository. You can test your paper upload in Demo Mode right now, or enter your token in API Settings.'
+                        : 'Your Personal Access Token was rejected by Zenodo because it lacks "deposit:write" and "deposit:actions" scopes, or belongs to a different Zenodo environment. You can test your paper in Demo Mode right now.'}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-amber-200/80">
+                <button
+                  type="button"
+                  onClick={handleSimulatedDeposit}
+                  disabled={isUploadingToZenodo}
+                  className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 cursor-pointer shadow-xs"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Continue in Demo Mode (Simulate DOI)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setZenodoEnv('sandbox');
+                    setShowApiSettings(true);
+                    setTimeout(() => apiKeysRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+                  }}
+                  className="px-3.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 cursor-pointer shadow-xs"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span>Switch to Zenodo Sandbox</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowApiSettings(true);
+                    setTimeout(() => apiKeysRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+                  }}
+                  className="px-3.5 py-1.5 bg-white hover:bg-slate-100 border border-amber-300 text-amber-900 font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Key className="w-3.5 h-3.5 text-amber-700" />
+                  <span>Configure Token in Settings</span>
+                </button>
+              </div>
+            </div>
+          )}
+
           <div className="pt-4 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3">
             <button
               type="button"
@@ -2288,18 +2685,37 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
               <span>Discard & Choose New PDF</span>
             </button>
 
-            <button
-              type="button"
-              onClick={handleUploadToZenodo}
-              disabled={isUploadingToZenodo}
-              className="w-full sm:w-auto flex-1 px-8 py-3.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2 disabled:bg-slate-300 shadow-sm cursor-pointer disabled:cursor-not-allowed"
-            >
-              {isUploadingToZenodo ? <Loader2 className="w-4 h-4 animate-spin" /> : <CloudUpload className="w-4 h-4" />}
-              <span>{isUploadingToZenodo ? 'Publishing to Zenodo...' : 'Step 4: Upload to Zenodo & Mint DOI'}</span>
-            </button>
+            <div className="flex flex-col sm:flex-row items-center gap-2 w-full sm:w-auto flex-1 justify-end">
+              <button
+                type="button"
+                onClick={handleSimulatedDeposit}
+                disabled={isUploadingToZenodo}
+                className="w-full sm:w-auto px-4 py-3 bg-purple-50 hover:bg-purple-100 border border-purple-200 text-purple-800 rounded-xl font-bold text-xs transition-all flex items-center justify-center gap-2 cursor-pointer shadow-2xs"
+                title="Mint simulated Zenodo DOI and APA citation instantly without an external API token"
+              >
+                <Sparkles className="w-4 h-4 text-purple-600" />
+                <span>Instant Demo Deposit</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleUploadToZenodo}
+                disabled={isUploadingToZenodo}
+                className="w-full sm:w-auto flex-1 px-6 py-3.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2 disabled:bg-slate-300 shadow-sm cursor-pointer disabled:cursor-not-allowed"
+              >
+                {isUploadingToZenodo ? <Loader2 className="w-4 h-4 animate-spin" /> : <CloudUpload className="w-4 h-4" />}
+                <span>
+                  {isUploadingToZenodo 
+                    ? 'Publishing to Zenodo...' 
+                    : zenodoEnv === 'demo'
+                      ? 'Step 4: Deposit in Demo Mode (Simulate DOI)'
+                      : 'Step 4: Upload to Zenodo & Mint DOI'}
+                </span>
+              </button>
+            </div>
           </div>
 
-          {!zenodoApiKey && (
+          {!zenodoApiKey && zenodoEnv !== 'demo' && (
             <p className="text-xs text-amber-700 text-center font-medium">
               Note: A Zenodo Personal Access Token is required to mint the DOI.{' '}
               <button
@@ -2308,6 +2724,14 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
                 className="underline font-bold text-amber-900 cursor-pointer"
               >
                 Click here to configure token
+              </button>
+              {' '}or use{' '}
+              <button
+                type="button"
+                onClick={handleSimulatedDeposit}
+                className="underline font-bold text-purple-700 cursor-pointer"
+              >
+                Instant Demo Deposit
               </button>
             </p>
           )}

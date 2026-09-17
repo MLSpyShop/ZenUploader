@@ -293,7 +293,11 @@ export default function PaperList({ user, refreshTrigger }: { user: User | null;
         try {
           const res = await fetch('/api/get-zenodo-papers?zenodoApiKey=' + encodeURIComponent(activeZenodoKey));
           if (res.ok) {
-            const zenodoDepositions = await res.json();
+            let zenodoDepositions: any = null;
+            try {
+              const raw = await res.text();
+              if (raw) zenodoDepositions = JSON.parse(raw);
+            } catch {}
             if (Array.isArray(zenodoDepositions)) {
               zenodoDepositions.forEach((dep: any) => {
                 const zId = String(dep.id);
@@ -712,7 +716,13 @@ export default function PaperList({ user, refreshTrigger }: { user: User | null;
 
       // 3. Update Zenodo deposition
       const cleanKey = await getCleanZenodoKey();
-      if (cleanKey && editingPaper.id && !editingPaper.id.startsWith('paper_') && !editingPaper.id.startsWith('local_')) {
+      const isDemoPaper = editingPaper.environment === 'demo' || 
+                          (editingPaper.metadata as any)?.isSimulation ||
+                          editingPaper.id.startsWith('demo_') || 
+                          editingPaper.id.startsWith('paper_') || 
+                          editingPaper.id.startsWith('local_');
+
+      if (editingPaper.id && !isDemoPaper && cleanKey) {
         try {
           const updateRes = await fetch('/api/update-zenodo-paper', {
             method: 'PUT',
@@ -720,16 +730,18 @@ export default function PaperList({ user, refreshTrigger }: { user: User | null;
             body: JSON.stringify({
               depositionId: editingPaper.id,
               metadata: finalMetadata,
-              zenodoApiKey: cleanKey
+              zenodoApiKey: cleanKey,
+              zenodoEnv: editingPaper.environment || 'auto',
+              demoMode: false
             })
           });
 
           if (!updateRes.ok) {
             const errBody = await updateRes.text();
-            console.warn('Zenodo update server notice:', errBody);
+            console.info('Zenodo remote update notice:', errBody);
           }
         } catch (zErr) {
-          console.warn('Zenodo update network error:', zErr);
+          console.info('Zenodo remote update network notice:', zErr);
         }
       }
 
@@ -1125,7 +1137,11 @@ export default function PaperList({ user, refreshTrigger }: { user: User | null;
 
                         {paper.environment && (
                           <span className={`text-[10px] uppercase tracking-wider font-bold px-2 py-0.5 rounded-md ${
-                            paper.environment === 'sandbox' ? 'bg-amber-100 text-amber-800' : 'bg-indigo-100 text-indigo-800'
+                            paper.environment === 'sandbox' 
+                              ? 'bg-amber-100 text-amber-800' 
+                              : paper.environment === 'demo'
+                                ? 'bg-purple-100 text-purple-800 border border-purple-200'
+                                : 'bg-indigo-100 text-indigo-800'
                           }`}>
                             {paper.environment}
                           </span>

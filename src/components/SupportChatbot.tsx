@@ -112,13 +112,18 @@ Click **"what is this and how does it work?"** below for an instant summary of o
         })
       });
 
+      const rawText = await res.text();
+      let data: any = null;
+      try {
+        if (rawText) data = JSON.parse(rawText);
+      } catch {}
+
       if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(errText || 'Failed to communicate with AI support assistant.');
+        const errMsg = data?.error || (rawText && !rawText.includes('<html') ? rawText : 'Failed to communicate with AI support assistant.');
+        throw new Error(errMsg);
       }
 
-      const data = await res.json();
-      const botResponse = data.reply || "I'm sorry, I couldn't process your request right now.";
+      const botResponse = data?.reply || "I'm sorry, I couldn't process your request right now.";
 
       const botMsg: Message = {
         id: `bot-${Date.now()}`,
