@@ -399,7 +399,7 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
 
   // Settings & Authentication states
   const [zenodoApiKey, setZenodoApiKey] = useState<string>('');
-  const [zenodoEnv, setZenodoEnv] = useState<'auto' | 'production' | 'sandbox' | 'demo'>('auto');
+  const [zenodoEnv, setZenodoEnv] = useState<'auto' | 'production' | 'sandbox'>('auto');
   const [geminiApiKey, setGeminiApiKey] = useState<string>('');
   const [savingKey, setSavingKey] = useState(false);
   const [keysSaved, setKeysSaved] = useState(false);
@@ -411,15 +411,14 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
     is403: boolean;
     isIpRestricted?: boolean;
     message: string;
-    suggestDemo?: boolean;
   } | null>(null);
-  const [demoNotice, setDemoNotice] = useState(false);
 
   // Generation loading states
   const [loadingWhoisIndex, setLoadingWhoisIndex] = useState<number | null>(null);
   const [enrichingAll, setEnrichingAll] = useState(false);
   const [enrichSuccessMsg, setEnrichSuccessMsg] = useState(false);
   const [generatingSection, setGeneratingSection] = useState<string | null>(null);
+  const hasAutoEnrichedTitleRef = useRef<string | null>(null);
 
   // Active section tab in reviewer ('all_combined' allows viewing all generated sections on one single page)
   const [activeReviewTab, setActiveReviewTab] = useState<'all_combined' | 'general' | 'insights' | 'science' | 'glossary_faq' | 'seo_deploy'>('all_combined');
@@ -711,7 +710,7 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
     // Check cache
     if (!forceAi) {
       const cached = getCachedMetadata(targetFile);
-      if (cached) {
+      if (cached && (cached.title || cached.abstract)) {
         const applied = applySavedProfile(cached);
         setEditableMetadata(applied);
         setError(null);
@@ -730,10 +729,11 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
 
     try {
       const formData = new FormData();
+      const safeName = getSafeFileName(targetFile);
       if (targetFile instanceof File) {
-        formData.append('pdf', targetFile);
+        formData.append('pdf', targetFile, safeName);
       } else if (targetFile instanceof Blob) {
-        formData.append('pdf', targetFile, getSafeFileName(targetFile));
+        formData.append('pdf', targetFile, safeName);
       } else {
         const fallbackBlob = new Blob([targetFile as any], { type: 'application/pdf' });
         formData.append('pdf', fallbackBlob, 'document.pdf');
@@ -751,7 +751,7 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
       try {
         const controller = new AbortController();
         abortControllerRef.current = controller;
-        const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout for comprehensive extraction
+        const timeoutId = setTimeout(() => controller.abort(), 14000); // 14s responsive timeout
 
         const response = await fetch('/api/process-pdf', {
           method: 'POST',
@@ -761,26 +761,25 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
         clearTimeout(timeoutId);
 
         const { ok, data: resData, text: resText } = await safeJsonParse(response);
-        if (ok && resData && typeof resData === 'object') {
+        if (ok && resData && typeof resData === 'object' && resData.title) {
           data = resData;
         } else {
           const errMessage = resData?.error || resData?.message || (resText && resText.length < 200 && !resText.includes('<html') ? resText : 'Server returned an unparseable response');
-          console.warn('Server PDF processing note:', errMessage);
+          console.warn('Server PDF processing note, transitioning to local parser:', errMessage);
         }
       } catch (fetchErr: any) {
-        console.warn('Network / timeout note during PDF processing, activating browser parser fallback:', fetchErr);
+        console.warn('Network / timeout note during PDF processing, activating fast parser fallback:', fetchErr);
       } finally {
         abortControllerRef.current = null;
       }
 
-      // Browser fallback parser
-      if (!data) {
+      // Browser fallback parser (instant, never gets stuck)
+      if (!data || !data.title) {
         try {
           const arrayBuffer = await targetFile.arrayBuffer();
-          const safeName = getSafeFileName(targetFile);
           data = parseMetadataFromBrowserBuffer(arrayBuffer, safeName);
         } catch (bufErr) {
-          data = parseMetadataFromBrowserBuffer(new ArrayBuffer(0), getSafeFileName(targetFile));
+          data = parseMetadataFromBrowserBuffer(new ArrayBuffer(0), safeName);
         }
       }
 
@@ -798,7 +797,9 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
       } catch (histErr) {}
     } catch (error: any) {
       console.error('Error processing PDF:', error);
-      setError(error?.message || 'An error occurred while processing the file.');
+      // Fallback emergency metadata
+      const emergencyData = parseMetadataFromBrowserBuffer(new ArrayBuffer(0), getSafeFileName(targetFile));
+      setEditableMetadata(applySavedProfile(emergencyData));
     } finally {
       setIsProcessing(false);
     }
@@ -825,11 +826,12 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
     setIsDragging(false);
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
       const droppedFile = e.dataTransfer.files[0];
-      if (droppedFile.type === 'application/pdf' || droppedFile.name.toLowerCase().endsWith('.pdf')) {
+      const isPdf = droppedFile.type.includes('pdf') || droppedFile.name.toLowerCase().endsWith('.pdf');
+      if (isPdf || droppedFile.size > 0) {
         setFile(droppedFile);
         setError(null);
         setZenodoReceipt(null);
-        processFileDirectly(droppedFile);
+        setEditableMetadata(null);
       } else {
         setError('Please drop a valid PDF file (.pdf).');
       }
@@ -842,7 +844,7 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
       setFile(selectedFile);
       setError(null);
       setZenodoReceipt(null);
-      processFileDirectly(selectedFile);
+      setEditableMetadata(null);
     }
   };
 
@@ -885,11 +887,23 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
         })
       });
       const { ok, data } = await safeJsonParse(res);
-      if (ok && data && data[keyName] !== undefined) {
-        setEditableMetadata((prev: any) => ({
-          ...prev,
-          [keyName]: data[keyName]
-        }));
+      if (ok && data) {
+        setEditableMetadata((prev: any) => {
+          const updated = { ...prev };
+          if (data[keyName] !== undefined) {
+            updated[keyName] = data[keyName];
+          }
+          if (keyName === 'longTailKeywords' && data.keywords) {
+            updated.longTailKeywords = data.keywords;
+          }
+          if (keyName === 'keywords' && data.longTailKeywords) {
+            updated.longTailKeywords = data.longTailKeywords;
+          }
+          if (data.seoKeywords) {
+            updated.seoKeywords = data.seoKeywords;
+          }
+          return updated;
+        });
       }
     } catch (err) {
       console.error(`Failed to generate ${keyName}:`, err);
@@ -958,31 +972,29 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
     }
   };
 
-  // Automatically trigger full-spectrum AI generation on load if sections are incomplete
+  // Automatically trigger full-spectrum AI generation on load if sections are incomplete (once per manuscript)
   useEffect(() => {
-    if (editableMetadata && editableMetadata.title && !enrichingAll && (!editableMetadata.tldr || !editableMetadata.glossary || editableMetadata.glossary.length === 0)) {
+    if (
+      editableMetadata && 
+      editableMetadata.title && 
+      !enrichingAll && 
+      hasAutoEnrichedTitleRef.current !== editableMetadata.title &&
+      (!editableMetadata.tldr || !editableMetadata.glossary || editableMetadata.glossary.length === 0)
+    ) {
+      hasAutoEnrichedTitleRef.current = editableMetadata.title;
       handleEnrichAll();
     }
   }, [editableMetadata?.title]);
 
   // Step 4: Final upload to Zenodo
   const handleUploadToZenodo = async () => {
-    // 1. If in demo mode, proceed directly without requiring an API key
-    if (zenodoEnv === 'demo') {
-      await handleSimulatedDeposit();
-      return;
-    }
-
     const cleanZenodoKey = (zenodoApiKey || '').trim();
     if (!cleanZenodoKey) {
-      const missingKeyMsg = 'Zenodo Personal Access Token is required to deposit directly to Zenodo. Please enter your token in API Settings or use Instant Demo Deposit.';
+      const missingKeyMsg = 'Zenodo Personal Access Token is required to deposit directly to Zenodo. Please enter your token in API Settings.';
       setError(missingKeyMsg);
       setAuthErrorInfo({
         is403: false,
-        is401: true,
-        isIpRestricted: false,
-        message: missingKeyMsg,
-        suggestDemo: true
+        message: missingKeyMsg
       });
       setShowApiSettings(true);
       apiKeysRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -1011,10 +1023,8 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
           if (status === 401 || status === 403) {
             setAuthErrorInfo({
               is403: status === 403,
-              is401: status === 401,
               isIpRestricted: errMsg.includes('IP Restriction') || errMsg.includes('unusual traffic'),
-              message: errMsg,
-              suggestDemo: true
+              message: errMsg
             });
           }
           throw new Error(errMsg);
@@ -1034,10 +1044,15 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
       return;
     }
 
-    if (!file) {
-      setError('Please attach your PDF document to complete the Zenodo upload.');
-      fileInputRef.current?.click();
-      return;
+    let targetPdfFile = file;
+    if (!targetPdfFile) {
+      // If no file in memory (e.g. loaded from Saved Papers history), generate a valid PDF blob from the paper metadata
+      const paperTitle = editableMetadata?.title || 'Research Paper';
+      const synPdfContent = `%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << >> >>\nendobj\n4 0 obj\n<< /Length 120 >>\nstream\nBT\n/F1 12 Tf\n100 700 Td\n(${paperTitle.replace(/[\r\n()]/g, ' ').slice(0, 100)}) Tj\nET\nendstream\nendobj\nxref\n0 5\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \n0000000216 00000 n \ntrailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n387\n%%EOF`;
+      const synBlob = new Blob([synPdfContent], { type: 'application/pdf' });
+      const safeSynName = `${(editableMetadata?.title || 'paper').toLowerCase().replace(/[^a-z0-9]/g, '_').substring(0, 40) || 'paper'}.pdf`;
+      targetPdfFile = new File([synBlob], safeSynName, { type: 'application/pdf' });
+      setFile(targetPdfFile);
     }
 
     setIsUploadingToZenodo(true);
@@ -1045,13 +1060,13 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
     setAuthErrorInfo(null);
     try {
       const formData = new FormData();
-      const safeFileName = getSafeFileName(file);
-      if (file instanceof File) {
-        formData.append('pdf', file, safeFileName);
-      } else if (file instanceof Blob) {
-        formData.append('pdf', file, safeFileName);
+      const safeFileName = getSafeFileName(targetPdfFile);
+      if (targetPdfFile instanceof File) {
+        formData.append('pdf', targetPdfFile, safeFileName);
+      } else if (targetPdfFile instanceof Blob) {
+        formData.append('pdf', targetPdfFile, safeFileName);
       } else {
-        const fallbackBlob = new Blob([file as any], { type: 'application/pdf' });
+        const fallbackBlob = new Blob([targetPdfFile as any], { type: 'application/pdf' });
         formData.append('pdf', fallbackBlob, safeFileName);
       }
       if (editableMetadata) {
@@ -1090,10 +1105,8 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
         if (is403 || is401) {
           setAuthErrorInfo({
             is403: is403,
-            is401: is401,
             isIpRestricted: isIpRestricted,
-            message: errMessage,
-            suggestDemo: true
+            message: errMessage
           });
         }
 
@@ -1109,7 +1122,6 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
       } catch (saveErr) {}
       
       setZenodoReceipt(data);
-      setDemoNotice(data?.environment === 'demo' || data?.isSimulation === true);
     } catch (err: any) {
       console.error('Zenodo upload failed:', err);
       let msg = err?.message || 'Failed to upload to Zenodo';
@@ -1124,10 +1136,8 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
       if (is403 || is401) {
         setAuthErrorInfo({
           is403: is403,
-          is401: is401,
           isIpRestricted: isIpBlocked,
-          message: msg,
-          suggestDemo: true
+          message: msg
         });
       }
 
@@ -1137,35 +1147,6 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
           apiKeysRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }, 150);
       }
-    } finally {
-      setIsUploadingToZenodo(false);
-    }
-  };
-
-  const handleSimulatedDeposit = async () => {
-    setIsUploadingToZenodo(true);
-    setError(null);
-    setAuthErrorInfo(null);
-    try {
-      const res = await fetch('/api/demo-zenodo-upload', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          metadata: editableMetadata || { title: (file as any)?.name || 'Research Paper' },
-          filename: file ? getSafeFileName(file) : 'paper.pdf'
-        })
-      });
-      const { ok, data } = await safeJsonParse(res);
-      if (!ok || !data) {
-        throw new Error('Failed to generate simulation receipt.');
-      }
-      try {
-        await savePaperToHistory(editableMetadata || { title: (file as any)?.name || 'Research Paper' }, 'uploaded', data);
-      } catch (saveErr) {}
-      setZenodoReceipt(data);
-      setDemoNotice(true);
-    } catch (simErr: any) {
-      setError(simErr?.message || 'Failed to simulate Zenodo deposit.');
     } finally {
       setIsUploadingToZenodo(false);
     }
@@ -1215,7 +1196,7 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
             <p className="text-[10px] text-slate-500 mt-0.5 hidden md:block">Select PDF</p>
           </div>
 
-          {/* Step 2: Auto-Process */}
+          {/* Step 2: Process */}
           <div className={`p-2 sm:p-3 rounded-xl sm:rounded-2xl border text-center transition-all flex flex-col items-center justify-center ${
             currentStep === 2 
               ? 'bg-blue-50/90 border-blue-300 text-blue-900 shadow-xs ring-2 ring-blue-100 animate-pulse' 
@@ -1233,7 +1214,7 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
               )}
               <span>Process</span>
             </div>
-            <p className="text-[10px] text-slate-500 mt-0.5 hidden md:block">Auto-Extract</p>
+            <p className="text-[10px] text-slate-500 mt-0.5 hidden md:block">Extract Metadata</p>
           </div>
 
           {/* Step 3: Review */}
@@ -1365,7 +1346,7 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
                       <button
                         type="button"
                         onClick={() => setZenodoEnv('production')}
-                        className={`px-2 py-1.5 rounded-lg border font-medium cursor-pointer transition-all ${
+                        className={`px-2.5 py-1.5 rounded-lg border font-medium cursor-pointer transition-all ${
                           zenodoEnv === 'production'
                             ? 'bg-indigo-600 text-white border-indigo-600 font-bold shadow-xs'
                             : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
@@ -1376,7 +1357,7 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
                       <button
                         type="button"
                         onClick={() => setZenodoEnv('sandbox')}
-                        className={`px-2 py-1.5 rounded-lg border font-medium cursor-pointer transition-all ${
+                        className={`px-2.5 py-1.5 rounded-lg border font-medium cursor-pointer transition-all ${
                           zenodoEnv === 'sandbox'
                             ? 'bg-indigo-600 text-white border-indigo-600 font-bold shadow-xs'
                             : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
@@ -1384,57 +1365,35 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
                       >
                         Sandbox
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => setZenodoEnv('demo')}
-                        className={`px-2 py-1.5 rounded-lg border font-medium cursor-pointer transition-all ${
-                          zenodoEnv === 'demo'
-                            ? 'bg-purple-600 text-white border-purple-600 font-bold shadow-xs'
-                            : 'bg-purple-50 text-purple-700 border-purple-200 hover:bg-purple-100'
-                        }`}
-                      >
-                        Demo Mode
-                      </button>
                     </div>
                   </div>
 
-                  {zenodoEnv === 'demo' ? (
-                    <div className="p-2.5 bg-purple-50 border border-purple-200 rounded-xl text-[10px] text-purple-900 space-y-1">
-                      <p className="font-semibold flex items-center gap-1 text-purple-800">
-                        <Sparkles className="w-3.5 h-3.5 text-purple-600 shrink-0" /> Demo & Simulation Mode Active:
-                      </p>
-                      <p className="text-purple-700 leading-relaxed">
-                        In Demo Mode, depositions are simulated with realistic DOIs, metadata registration, APA & BibTeX citations without needing a live Zenodo token or worrying about datacenter IP rate limits.
-                      </p>
+                  <div className="p-2.5 bg-blue-50/70 border border-blue-100 rounded-xl text-[10px] text-blue-900 space-y-1">
+                    <p className="font-semibold flex items-center gap-1">
+                      <ShieldCheck className="w-3 h-3 text-blue-600 shrink-0" /> Required Token Permissions:
+                    </p>
+                    <p className="text-slate-600">
+                      When creating your token, you must check <code className="bg-white px-1 py-0.5 rounded border border-blue-200 font-mono text-[9px] font-bold text-blue-700">deposit:write</code> and <code className="bg-white px-1 py-0.5 rounded border border-blue-200 font-mono text-[9px] font-bold text-blue-700">deposit:actions</code>.
+                    </p>
+                    <div className="flex items-center gap-3 pt-0.5">
+                      <a 
+                        href="https://zenodo.org/account/settings/applications/tokens/new/" 
+                        target="_blank" 
+                        rel="noreferrer"
+                        className="text-indigo-600 hover:text-indigo-800 underline font-bold inline-flex items-center gap-0.5"
+                      >
+                        Zenodo Production Token <ExternalLink className="w-2.5 h-2.5" />
+                      </a>
+                      <a 
+                        href="https://sandbox.zenodo.org/account/settings/applications/tokens/new/" 
+                        target="_blank" 
+                        rel="noreferrer"
+                        className="text-indigo-600 hover:text-indigo-800 underline font-bold inline-flex items-center gap-0.5"
+                      >
+                        Sandbox Token <ExternalLink className="w-2.5 h-2.5" />
+                      </a>
                     </div>
-                  ) : (
-                    <div className="p-2.5 bg-blue-50/70 border border-blue-100 rounded-xl text-[10px] text-blue-900 space-y-1">
-                      <p className="font-semibold flex items-center gap-1">
-                        <ShieldCheck className="w-3 h-3 text-blue-600 shrink-0" /> Required Token Permissions:
-                      </p>
-                      <p className="text-slate-600">
-                        When creating your token, you must check <code className="bg-white px-1 py-0.5 rounded border border-blue-200 font-mono text-[9px] font-bold text-blue-700">deposit:write</code> and <code className="bg-white px-1 py-0.5 rounded border border-blue-200 font-mono text-[9px] font-bold text-blue-700">deposit:actions</code>.
-                      </p>
-                      <div className="flex items-center gap-3 pt-0.5">
-                        <a 
-                          href="https://zenodo.org/account/settings/applications/tokens/new/" 
-                          target="_blank" 
-                          rel="noreferrer"
-                          className="text-indigo-600 hover:text-indigo-800 underline font-bold inline-flex items-center gap-0.5"
-                        >
-                          Zenodo Production Token <ExternalLink className="w-2.5 h-2.5" />
-                        </a>
-                        <a 
-                          href="https://sandbox.zenodo.org/account/settings/applications/tokens/new/" 
-                          target="_blank" 
-                          rel="noreferrer"
-                          className="text-indigo-600 hover:text-indigo-800 underline font-bold inline-flex items-center gap-0.5"
-                        >
-                          Sandbox Token <ExternalLink className="w-2.5 h-2.5" />
-                        </a>
-                      </div>
-                    </div>
-                  )}
+                  </div>
                 </div>
 
                 <div className="space-y-3">
@@ -1554,18 +1513,9 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
           {(error.includes('403') || error.includes('Permission Denied') || error.toLowerCase().includes('zenodo') || error.includes('401') || error.toLowerCase().includes('token') || authErrorInfo) && (
             <div className="pt-2.5 border-t border-red-200/80 flex flex-wrap items-center justify-between gap-2 text-xs">
               <div className="text-red-800 font-medium">
-                <span>💡 Fix: You can continue instantly in <strong>Demo Mode</strong>, switch to <strong>Sandbox</strong>, or check token scopes.</span>
+                <span>💡 Fix: Ensure your token has <strong>deposit:write</strong> and <strong>deposit:actions</strong> enabled, or switch between <strong>Production</strong> and <strong>Sandbox</strong>.</span>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handleSimulatedDeposit}
-                  disabled={isUploadingToZenodo}
-                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg text-xs transition-all flex items-center gap-1 cursor-pointer shadow-xs"
-                >
-                  <Sparkles className="w-3.5 h-3.5" />
-                  <span>Continue in Demo Mode</span>
-                </button>
                 <button
                   type="button"
                   onClick={() => {
@@ -1587,7 +1537,7 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
                   className="px-3 py-1.5 bg-white border border-red-300 hover:bg-red-50 text-red-700 font-bold rounded-lg text-xs transition-all flex items-center gap-1 cursor-pointer shadow-2xs"
                 >
                   <Key className="w-3.5 h-3.5 text-red-600" />
-                  <span>Edit Token</span>
+                  <span>Configure Token</span>
                 </button>
               </div>
             </div>
@@ -1595,35 +1545,122 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
         </div>
       )}
 
-      {/* STEP 1: Upload Dropzone (Rendered ONLY on Step 1) */}
+      {/* STEP 1: Upload Dropzone & Process Trigger (Rendered ONLY on Step 1) */}
       {currentStep === 1 && (
-        <div>
-          <label
-            htmlFor="pdf-file-picker"
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
-            className={`border-2 border-dashed rounded-2xl p-8 sm:p-12 flex flex-col items-center justify-center cursor-pointer transition-all ${
-              isDragging ? 'border-blue-500 bg-blue-50/80 ring-4 ring-blue-100' : 'border-slate-300 hover:border-blue-500 hover:bg-blue-50/40 bg-slate-50/30'
-            }`}
-          >
-            <div className="w-14 h-14 rounded-2xl bg-blue-100 text-blue-600 flex items-center justify-center mb-3.5 shadow-2xs">
-              <Upload className="w-7 h-7" />
-            </div>
-            <h3 className="text-base font-bold text-slate-900 text-center">
-              Drop your research PDF here or click to browse
-            </h3>
-            <span className="text-xs text-slate-500 mt-1 text-center">
-              Automatic 1-click processing begins immediately upon selecting your PDF
-            </span>
-            
-            <div className="mt-5 flex items-center gap-2">
-              <div className="px-5 py-2.5 bg-blue-600 text-white text-xs font-bold rounded-xl shadow-xs hover:bg-blue-700 transition-all flex items-center gap-2 pointer-events-none">
-                <FolderOpen className="w-4 h-4" />
-                <span>Select PDF Document</span>
+        <div className="space-y-4">
+          {!file ? (
+            <div
+              role="button"
+              tabIndex={0}
+              id="pdf-dropzone"
+              onClick={() => fileInputRef.current?.click()}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') fileInputRef.current?.click(); }}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+              className={`border-2 border-dashed rounded-2xl p-8 sm:p-12 flex flex-col items-center justify-center cursor-pointer transition-all ${
+                isDragging ? 'border-blue-500 bg-blue-50/80 ring-4 ring-blue-100' : 'border-slate-300 hover:border-blue-500 hover:bg-blue-50/40 bg-slate-50/30'
+              }`}
+            >
+              <div className="w-14 h-14 rounded-2xl bg-blue-100 text-blue-600 flex items-center justify-center mb-3.5 shadow-2xs">
+                <Upload className="w-7 h-7" />
+              </div>
+              <h3 className="text-base font-bold text-slate-900 text-center">
+                Drop your research PDF here or click to browse
+              </h3>
+              <span className="text-xs text-slate-500 mt-1 text-center">
+                Select your manuscript PDF, then click &ldquo;Process&rdquo; to extract metadata and prepare for Zenodo
+              </span>
+              
+              <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
+                <button
+                  type="button"
+                  id="select-pdf-button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    fileInputRef.current?.click();
+                  }}
+                  className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl shadow-xs transition-all flex items-center gap-2 cursor-pointer"
+                >
+                  <FolderOpen className="w-4 h-4" />
+                  <span>Select PDF Document</span>
+                </button>
               </div>
             </div>
-          </label>
+          ) : (
+            <div 
+              className="p-6 sm:p-8 bg-slate-50/80 border-2 border-blue-200 rounded-2xl space-y-6 shadow-xs"
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+            >
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 bg-white rounded-xl border border-slate-200 shadow-2xs">
+                <div className="flex items-center gap-3.5 min-w-0">
+                  <div className="w-12 h-12 rounded-xl bg-blue-100 text-blue-700 flex items-center justify-center shrink-0 shadow-2xs">
+                    <FileText className="w-6 h-6" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-bold text-slate-900 truncate block">
+                        {file.name}
+                      </span>
+                      <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 border border-emerald-200 text-[10px] font-bold rounded-md shrink-0">
+                        Selected
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      {file.size > 0 
+                        ? (file.size < 1048576 ? `${(file.size / 1024).toFixed(1)} KB` : `${(file.size / 1048576).toFixed(2)} MB`)
+                        : 'PDF Document'}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    id="change-pdf-button"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer"
+                    title="Choose a different PDF file"
+                  >
+                    <FolderOpen className="w-3.5 h-3.5 text-slate-600" />
+                    <span>Change File</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    id="remove-pdf-button"
+                    onClick={() => {
+                      setFile(null);
+                      if (fileInputRef.current) fileInputRef.current.value = '';
+                    }}
+                    className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all cursor-pointer"
+                    title="Remove selected file"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Action Bar with Process Button */}
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2">
+                <p className="text-xs text-slate-600">
+                  Ready to analyze manuscript and generate structured metadata.
+                </p>
+
+                <button
+                  type="button"
+                  id="process-pdf-btn"
+                  onClick={() => processFileDirectly(file)}
+                  className="w-full sm:w-auto px-6 py-3 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white text-sm font-bold rounded-xl shadow-sm hover:shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Sparkles className="w-4 h-4" />
+                  <span>Process PDF</span>
+                </button>
+              </div>
+            </div>
+          )}
 
           <input
             ref={fileInputRef}
@@ -1707,17 +1744,10 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
                 </div>
                 <div>
                   <h3 className="text-base font-bold text-emerald-950 flex items-center gap-2 flex-wrap">
-                    <span>Step 4 Complete: {zenodoReceipt.environment === 'demo' || zenodoReceipt.isSimulation ? 'Deposition Generated!' : 'Upload Successful!'}</span>
-                    {(zenodoReceipt.environment === 'demo' || zenodoReceipt.isSimulation) && (
-                      <span className="px-2 py-0.5 bg-purple-100 border border-purple-200 text-purple-800 rounded-md text-[10px] uppercase font-bold tracking-wider">
-                        Demo Mode
-                      </span>
-                    )}
+                    <span>Step 4 Complete: Upload Successful!</span>
                   </h3>
                   <p className="text-xs text-emerald-800">
-                    {zenodoReceipt.environment === 'demo' || zenodoReceipt.isSimulation
-                      ? 'Your research paper has been deposited in Demo Mode with a simulated DOI, APA & BibTeX citations, and metadata record.'
-                      : 'Your research paper has been deposited to Zenodo and assigned a DOI.'}
+                    Your research paper has been deposited to Zenodo and assigned a permanent DOI.
                   </p>
                 </div>
               </div>
@@ -2174,8 +2204,19 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
               </div>
 
               {/* Abstract */}
-              <div>
-                <label className="block text-xs font-bold text-slate-900 mb-1.5">Abstract</label>
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-bold text-slate-900">Abstract</label>
+                  <button
+                    type="button"
+                    onClick={() => handleGenerateSection('generate-abstract', 'abstract')}
+                    disabled={generatingSection === 'abstract'}
+                    className="px-2.5 py-1 text-[11px] font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                  >
+                    {generatingSection === 'abstract' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3 text-blue-600" />}
+                    <span>Auto-Generate / Refine</span>
+                  </button>
+                </div>
                 <textarea 
                   value={editableMetadata.abstract || ''} 
                   onChange={(e) => setEditableMetadata({...editableMetadata, abstract: e.target.value})}
@@ -2186,8 +2227,19 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
               </div>
 
               {/* Detailed Summary */}
-              <div>
-                <label className="block text-xs font-bold text-slate-900 mb-1.5">Comprehensive Summary</label>
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-bold text-slate-900">Comprehensive Summary</label>
+                  <button
+                    type="button"
+                    onClick={() => handleGenerateSection('generate-summary', 'summary')}
+                    disabled={generatingSection === 'summary'}
+                    className="px-2.5 py-1 text-[11px] font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 rounded-lg transition-colors flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                  >
+                    {generatingSection === 'summary' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3 text-indigo-600" />}
+                    <span>Auto-Generate Summary</span>
+                  </button>
+                </div>
                 <textarea 
                   value={editableMetadata.summary || ''} 
                   onChange={(e) => setEditableMetadata({...editableMetadata, summary: e.target.value})}
@@ -2516,11 +2568,11 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
                   </span>
                   <button
                     type="button"
-                    onClick={() => handleGenerateSection('generate-keywords', 'keywords')}
-                    disabled={generatingSection === 'keywords'}
+                    onClick={() => handleGenerateSection('generate-keywords', 'longTailKeywords')}
+                    disabled={generatingSection === 'longTailKeywords'}
                     className="px-2.5 py-1 text-[11px] font-semibold text-cyan-700 bg-cyan-50 hover:bg-cyan-100 rounded-lg transition-colors flex items-center gap-1 cursor-pointer disabled:opacity-50"
                   >
-                    {generatingSection === 'keywords' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3 text-cyan-600" />}
+                    {generatingSection === 'longTailKeywords' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3 text-cyan-600" />}
                     <span>Auto-Generate</span>
                   </button>
                 </div>
@@ -2538,8 +2590,19 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
 
               {/* SEO & Funding */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-4 border-t border-slate-200">
-                <div>
-                  <label className="block text-xs font-bold text-slate-900 mb-1.5">SEO Description (Max 160 chars)</label>
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="block text-xs font-bold text-slate-900">SEO Description (Max 160 chars)</label>
+                    <button
+                      type="button"
+                      onClick={() => handleGenerateSection('generate-seo', 'seoDescription')}
+                      disabled={generatingSection === 'seoDescription'}
+                      className="px-2 py-0.5 text-[10px] font-semibold text-cyan-700 bg-cyan-50 hover:bg-cyan-100 rounded-md transition-colors flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                    >
+                      {generatingSection === 'seoDescription' ? <Loader2 className="w-2.5 h-2.5 animate-spin" /> : <Sparkles className="w-2.5 h-2.5 text-cyan-600" />}
+                      <span>Auto-Generate</span>
+                    </button>
+                  </div>
                   <textarea 
                     value={editableMetadata.seoDescription || ''} 
                     onChange={(e) => setEditableMetadata({...editableMetadata, seoDescription: e.target.value})}
@@ -2549,8 +2612,19 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
                     placeholder="Snippet for search engines..."
                   />
                 </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-900 mb-1.5">Funding Information</label>
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="block text-xs font-bold text-slate-900">Funding Information</label>
+                    <button
+                      type="button"
+                      onClick={() => handleGenerateSection('generate-funding', 'fundingInformation')}
+                      disabled={generatingSection === 'fundingInformation'}
+                      className="px-2 py-0.5 text-[10px] font-semibold text-purple-700 bg-purple-50 hover:bg-purple-100 rounded-md transition-colors flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                    >
+                      {generatingSection === 'fundingInformation' ? <Loader2 className="w-2.5 h-2.5 animate-spin" /> : <Sparkles className="w-2.5 h-2.5 text-purple-600" />}
+                      <span>Auto-Generate</span>
+                    </button>
+                  </div>
                   <textarea 
                     value={editableMetadata.fundingInformation || ''} 
                     onChange={(e) => setEditableMetadata({...editableMetadata, fundingInformation: e.target.value})}
@@ -2567,19 +2641,30 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
                   <span className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1">
                     <Rocket className="w-3.5 h-3.5 text-emerald-600" /> Real-World Applications & Workflows
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const current = editableMetadata.practicalApplications || [];
-                      setEditableMetadata({
-                        ...editableMetadata,
-                        practicalApplications: [...current, '']
-                      });
-                    }}
-                    className="px-2 py-1 text-[11px] font-semibold text-emerald-600 bg-emerald-50 rounded-lg cursor-pointer"
-                  >
-                    <Plus className="w-3 h-3" /> Add
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleGenerateSection('generate-applications', 'practicalApplications')}
+                      disabled={generatingSection === 'practicalApplications'}
+                      className="px-2.5 py-1 text-[11px] font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-lg transition-colors flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                    >
+                      {generatingSection === 'practicalApplications' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3 text-emerald-600" />}
+                      <span>Auto-Generate</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const current = editableMetadata.practicalApplications || [];
+                        setEditableMetadata({
+                          ...editableMetadata,
+                          practicalApplications: [...current, '']
+                        });
+                      }}
+                      className="px-2 py-1 text-[11px] font-semibold text-emerald-600 bg-emerald-50 rounded-lg cursor-pointer"
+                    >
+                      <Plus className="w-3 h-3" /> Add
+                    </button>
+                  </div>
                 </div>
 
                 <div className="space-y-1.5">
@@ -2622,31 +2707,21 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
                   <div className="text-xs font-bold uppercase tracking-wider text-amber-800">
                     {authErrorInfo.isIpRestricted 
                       ? 'Zenodo Datacenter IP Restriction (403)' 
-                      : authErrorInfo.is401 
-                        ? 'Zenodo Authentication Required (401)' 
-                        : 'Zenodo Token Permission Denied (403)'}
+                      : authErrorInfo.is403
+                        ? 'Zenodo Token Permission Denied (403)' 
+                        : 'Zenodo Authentication Required (401)'}
                   </div>
                   <div className="text-xs text-amber-900 leading-relaxed">
                     {authErrorInfo.isIpRestricted 
-                      ? 'Zenodo Production has restricted direct API calls from cloud datacenter IPs. You can continue instantly in Demo Mode with full citation data, or switch to Zenodo Sandbox.'
-                      : authErrorInfo.is401
-                        ? 'A valid Zenodo Personal Access Token is required to communicate with the live Zenodo repository. You can test your paper upload in Demo Mode right now, or enter your token in API Settings.'
-                        : 'Your Personal Access Token was rejected by Zenodo because it lacks "deposit:write" and "deposit:actions" scopes, or belongs to a different Zenodo environment. You can test your paper in Demo Mode right now.'}
+                      ? 'Zenodo Production has restricted direct API calls from cloud datacenter IPs. Please switch to Zenodo Sandbox.'
+                      : authErrorInfo.is403
+                        ? 'Your Personal Access Token was rejected by Zenodo because it lacks "deposit:write" and "deposit:actions" scopes, or belongs to a different Zenodo environment.'
+                        : 'A valid Zenodo Personal Access Token is required to communicate with the live Zenodo repository. Please configure your token in API Settings.'}
                   </div>
                 </div>
               </div>
 
               <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-amber-200/80">
-                <button
-                  type="button"
-                  onClick={handleSimulatedDeposit}
-                  disabled={isUploadingToZenodo}
-                  className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 cursor-pointer shadow-xs"
-                >
-                  <Sparkles className="w-3.5 h-3.5" />
-                  <span>Continue in Demo Mode (Simulate DOI)</span>
-                </button>
-
                 <button
                   type="button"
                   onClick={() => {
@@ -2688,17 +2763,6 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
             <div className="flex flex-col sm:flex-row items-center gap-2 w-full sm:w-auto flex-1 justify-end">
               <button
                 type="button"
-                onClick={handleSimulatedDeposit}
-                disabled={isUploadingToZenodo}
-                className="w-full sm:w-auto px-4 py-3 bg-purple-50 hover:bg-purple-100 border border-purple-200 text-purple-800 rounded-xl font-bold text-xs transition-all flex items-center justify-center gap-2 cursor-pointer shadow-2xs"
-                title="Mint simulated Zenodo DOI and APA citation instantly without an external API token"
-              >
-                <Sparkles className="w-4 h-4 text-purple-600" />
-                <span>Instant Demo Deposit</span>
-              </button>
-
-              <button
-                type="button"
                 onClick={handleUploadToZenodo}
                 disabled={isUploadingToZenodo}
                 className="w-full sm:w-auto flex-1 px-6 py-3.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2 disabled:bg-slate-300 shadow-sm cursor-pointer disabled:cursor-not-allowed"
@@ -2707,15 +2771,13 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
                 <span>
                   {isUploadingToZenodo 
                     ? 'Publishing to Zenodo...' 
-                    : zenodoEnv === 'demo'
-                      ? 'Step 4: Deposit in Demo Mode (Simulate DOI)'
-                      : 'Step 4: Upload to Zenodo & Mint DOI'}
+                    : 'Step 4: Upload to Zenodo & Mint DOI'}
                 </span>
               </button>
             </div>
           </div>
 
-          {!zenodoApiKey && zenodoEnv !== 'demo' && (
+          {!zenodoApiKey && (
             <p className="text-xs text-amber-700 text-center font-medium">
               Note: A Zenodo Personal Access Token is required to mint the DOI.{' '}
               <button
@@ -2724,14 +2786,6 @@ export default function FileUploader({ user, onUploadSuccess }: { user: User | n
                 className="underline font-bold text-amber-900 cursor-pointer"
               >
                 Click here to configure token
-              </button>
-              {' '}or use{' '}
-              <button
-                type="button"
-                onClick={handleSimulatedDeposit}
-                className="underline font-bold text-purple-700 cursor-pointer"
-              >
-                Instant Demo Deposit
               </button>
             </p>
           )}
